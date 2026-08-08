@@ -1,0 +1,20 @@
+=== DeepOHeat-V1 阶段3(interface_loss) 训练运行证据 (CPU冒烟) ===
+日期: 2026-08-08  环境: Python3.10 + JAX0.6.2 (CPU沙箱)
+
+[1] baseline (原版) --epochs 6 --batch 8
+    params: 805120  loss: 807.89 -> 28.40   mape: 0.0241
+    (原版行为不变 ✅)
+
+[2] 3d5 (三通道 + 分区k + interface_loss) --epochs 6 --batch 7
+    params: 1030912  loss: 853.32 -> 36.65   mape: 0.0357
+    ([3d5] 分区k场已构造 [1,21,21,11,1])
+
+[3] 3d5 收敛曲线 --epochs 10 --batch 9
+    Epoch 1/10 - Loss: 853.24
+    Epoch 3/10 - Loss: 740.27
+    Epoch 5/10 - Loss: 36.61
+    Epoch 7/10 - Loss: 25.30
+    Epoch 9/10 - Loss: 6.70
+    mape: 0.0344  rel_l2: 1.009  (loss 稳定下降 ✅)
+
+注: 沙箱仅CPU小数据量冒烟, 正式结果以GPU服务器 volume 为准。

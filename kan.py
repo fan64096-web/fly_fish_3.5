@@ -8,7 +8,6 @@ class ChebyKANLayer(eqx.Module):
     output_dim: int
     degree: int
     cheby_coeffs: jax.Array
-    arange: jax.Array
 
     def __init__(self, input_dim: int, output_dim: int, degree: int, key: jax.random.PRNGKey):
         super().__init__()
@@ -21,33 +20,18 @@ class ChebyKANLayer(eqx.Module):
             cheby_coeffs_key, 
             (input_dim, output_dim, degree + 1)
         ) / jnp.sqrt(input_dim * (degree + 1))
-        
-        self.arange = jnp.arange(0, degree + 1, 1)
 
     def __call__(self, x):
-        # Normalize x to [-1, 1] using tanh
         x = jnp.tanh(x)
-      
-        # Expand dimensions
         x = jnp.expand_dims(x, axis=-1)
-      
         x = jnp.repeat(x, self.degree + 1, axis=-1)
-
-        # Apply acos
         x = jnp.arccos(x)
-        
-        # Multiply by arange [0 .. degree]
-        x = x * self.arange
-        
-        # Apply cos
+        x = x * jnp.arange(0, self.degree + 1, 1)
         x = jnp.cos(x)
-       
-        
-        # Compute the Chebyshev interpolation
         y = jnp.einsum('id,iod->o', x, self.cheby_coeffs)
-        
         return y
-    
+
+
 class ChebyKAN(eqx.Module):
     layers: list
 

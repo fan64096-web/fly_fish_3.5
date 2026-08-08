@@ -227,16 +227,17 @@ class DeepOHeat_ST(eqx.Module):
         
         
 class DeepOHeat_v1(eqx.Module):
-   
+
     dim: int
     branch_dim: int
     field_dim: int
     trunk: eqx.Module
     branch: eqx.Module
     rank: int
+    channels: int
     outer_product_string: str
 
-    def __init__(self, 
+    def __init__(self,
                  dim,
                  branch_dim,
                  field_dim=1,
@@ -247,6 +248,7 @@ class DeepOHeat_v1(eqx.Module):
                  rank=64,
                  branch_activation=jax.nn.swish,
                  branch_final_activation=identity,
+                 channels=1,   # 输入通道数：baseline=1(仅功率)，3.5D=3(功率+掩码+界面)
                  key=None,
                  ):
         super().__init__()
@@ -266,17 +268,22 @@ class DeepOHeat_v1(eqx.Module):
         
         trunk = make_ensemble(subkeys[:-2])
 
-        branch = eqx.filter_vmap(nn.MLP(branch_dim, rank*field_dim, branch_hidden, branch_depth, 
-                        activation=branch_activation, 
-                        final_activation=branch_final_activation, 
-                        key=subkeys[-1]))# branch_dim are number of features measured in function space
+        # Branch 网络输入维度 = 每通道维度 × 通道数
+        #   baseline 模式: channels=1, 输入 = [branch_dim]（仅功率）
+        #   3.5D 模式:     channels=3, 输入 = [3×branch_dim]（功率+掩码+界面，数据加载处拼接好）
+        # 不改网络主体结构：MLP 第一层输入维度只是自动适配拼接后的向量长度
+        branch = eqx.filter_vmap(nn.MLP(branch_dim*channels, rank*field_dim, branch_hidden, branch_depth,
+                        activation=branch_activation,
+                        final_activation=branch_final_activation,
+                        key=subkeys[-1]))# branch_dim*channels are number of features measured in function space
         # branch = eqx.filter_vmap(ChebyKAN(branch_dim,rank*field_dim,branch_hidden,branch_depth,key=subkeys[-1]))
-        
-       
+
+
 
         self.dim = dim
         self.field_dim = field_dim
         self.branch_dim = branch_dim
+        self.channels = channels
         self.trunk = trunk
         self.branch = branch
         self.rank = rank

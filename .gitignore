@@ -1,3 +1,24 @@
+# Python
 __pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# 训练结果（体积大，不入库）
 results/
+figs/
+figs_repro/
+
+# 数据文件（体积大：volume 原始 8GB / 三通道 24GB，不入库）
 data/
+*.npy
+
+# 临时/系统
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# git 锁（异常残留）
+.git/index.lock

@@ -9,6 +9,7 @@ import argparse
 import optax
 from functools import partial
 from models import DeepOHeat, DeepOHeat_KAN, DeepOHeat_ST, DeepOHeat_v1
+from k_map import build_k_field
 from jax import vmap
 from hvp import hvp_fwdfwd, hvp_fwdrev
 from train import train_loop, update
@@ -76,12 +77,12 @@ def apply_model_deepoheat(model, xc, yc, zc, fc, lam_b=1.):
 
 
 @eqx.filter_jit
-def apply_model_deepoheat_st(model, xc, yc, zc, fc, lam_b=1.):
+def apply_model_deepoheat_st(model, xc, yc, zc, fc, lam_b=1., power_dim=None, k_field=None):
 
     def PDE_loss(model, x, y, z, f):
         # compute u
         u = model(((x, y, z), f))
-    
+
         # tangent vector dx/dx dy/dy dz/dz
         v_x = jnp.ones(x.shape)
         v_y = jnp.ones(y.shape)
@@ -92,18 +93,50 @@ def apply_model_deepoheat_st(model, xc, yc, zc, fc, lam_b=1.):
         uy, uyy = hvp_fwdfwd(lambda y: model(((x, y, z), f)), (y,), (v_y,), True)
         uz, uzz = hvp_fwdfwd(lambda z: model(((x, y, z), f)), (z,), (v_z,), True)
 
-        # PDE residual, only interior points are used
-        pde_res = jnp.mean((uxx + uyy + uzz)**2)
+        # PDE residual（简化版分区：∇·(k∇T) ≈ k·∇²T，分块常数 k）
+        #   baseline 模式：k_field=None，残差 = (∇²T)²，与原版完全一致
+        #   3d5 模式    ：k_field 传入，残差 = (k·∇²T)²，各区域/各 z 层用不同 k
+        laplacian = uxx + uyy + uzz
+        if k_field is not None:
+            pde_res = jnp.mean((k_field * laplacian)**2)
+        else:
+            pde_res = jnp.mean(laplacian**2)
+
+        # 3.5D 模式：f 是 [功率|掩码|界面] 三通道拼接，边界条件只使用功率段
+        # baseline 模式：power_dim=None，f 即纯功率，行为与原版完全一致
+        f_power = f[..., :power_dim] if power_dim is not None else f
 
         # top surface
-        bc_top = jnp.mean((uz[:,:,:,-1,:] - f.reshape(-1,21,21,1))**2)
+        bc_top = jnp.mean((uz[:,:,:,-1,:] - f_power.reshape(-1,21,21,1))**2)
         # bottom surface
         bc_bottom = jnp.mean((u[:,:,:,0,:] - 0.2 - 0.2*uz[:,:,:,0,:])**2)
         # other_surfaces
         bc_other = jnp.mean((uy[:,:,0,:,:])**2) + jnp.mean((uy[:,:,-1,:,:])**2) + jnp.mean((ux[:,0,:,:,:])**2) + jnp.mean((ux[:,-1,:,:,:])**2)
-      
 
-        return pde_res + lam_b*(bc_top + bc_bottom + bc_other)
+        # 界面热流连续：界面两侧 k·∂u/∂n 相等
+        #   k_field 传入（3d5 模式）时启用，baseline 模式（k_field=None）不启用
+        #   x 界面：x=0.5 处，取 x 界面左/右两侧的 ux，乘各自 k，要求相等
+        #   y 界面：y=0.5 处，取 y 界面上/下两侧的 uy，乘各自 k，要求相等
+        #   u/ux/uy 形状 [batch, nx, ny, nz, 1]，21 点网格界面在索引 10
+        if k_field is not None:
+            # x 界面：左侧点索引 9，右侧点索引 10（界面线在 10，左邻 9，右邻 10）
+            k_left_x  = k_field[:, 9:10, :, :, :]
+            k_right_x = k_field[:, 10:11, :, :, :]
+            ux_left   = ux[:, 9:10, :, :, :]
+            ux_right  = ux[:, 10:11, :, :, :]
+            # y 界面：下侧点索引 9，上侧点索引 10
+            k_down_y  = k_field[:, :, 9:10, :, :]
+            k_up_y    = k_field[:, :, 10:11, :, :]
+            uy_down   = uy[:, :, 9:10, :, :]
+            uy_up     = uy[:, :, 10:11, :, :]
+            # 界面热流残差：两侧 k·du/dn 的差平方
+            interface_loss = jnp.mean((k_left_x*ux_left - k_right_x*ux_right)**2) + \
+                             jnp.mean((k_down_y*uy_down - k_up_y*uy_up)**2)
+        else:
+            interface_loss = 0.0
+
+
+        return pde_res + lam_b*(bc_top + bc_bottom + bc_other) + interface_loss
 
 
     # isolate loss func from redundant arguments
@@ -182,9 +215,11 @@ def deepoheat_st_test_generator(fs, u):
 if __name__ == '__main__':
     # config
     parser = argparse.ArgumentParser(description='Training configurations')
-    parser.add_argument('--model_name', type=str, default='DeepOHeat_v1', choices=['DeepOHeat', 'DeepOHeat_KAN', 
+    parser.add_argument('--model_name', type=str, default='DeepOHeat_v1', choices=['DeepOHeat', 'DeepOHeat_KAN',
                                                                                           'DeepOHeat_ST', 'DeepOHeat_v1'])
     parser.add_argument('--device_name', type=int, default=0, choices=[0, 1], help='GPU device')
+    parser.add_argument('--mode', type=str, default='baseline', choices=['baseline', '3d5'],
+                        help='input mode: baseline=仅功率(原版); 3d5=功率+掩码+界面(3.5D)')
 
     # training data settings
     parser.add_argument('--nc', type=int, default=21, help='the number of input points for each axis')
@@ -209,15 +244,28 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # set up the device
-    fs_train = jnp.load('data/fs_train_surface.npy').reshape(-1,21**2)
-    fs_test = jnp.load('data/fs_test_surface.npy').reshape(-1,21**2)
+    # 数据加载：按 mode 选择 Branch 输入通道
+    if args.mode == '3d5':
+        # 3.5D 模式：功率+掩码+界面 三通道拼接
+        # （拼接后的数据文件由 gen_mask.py 生成）
+        fs_train = jnp.load('data/fs_train_3d5_surface.npy').reshape(-1, 3*21**2)
+        fs_test = jnp.load('data/fs_test_3d5_surface.npy').reshape(-1, 3*21**2)
+        args.channels = 3
+        if args.model_name != 'DeepOHeat_v1':
+            print(f'[mode=3d5] 仅支持 DeepOHeat_v1，已强制切换（原为 {args.model_name}）')
+            args.model_name = 'DeepOHeat_v1'
+    else:
+        # baseline 模式：仅功率（原版行为）
+        fs_train = jnp.load('data/fs_train_surface.npy').reshape(-1,21**2)
+        fs_test = jnp.load('data/fs_test_surface.npy').reshape(-1,21**2)
+        args.channels = 1
     u_test = jnp.load('data/u_test_surface.npy')
 
     # result dir
     root_dir = os.path.join(os.getcwd(), 'results', 'results_surface', args.model_name)
-    result_dir = os.path.join(root_dir, 'nf'+str(args.batch)+'_nc'+str(args.nc) + '_branch_' + str(args.branch_depth) + 
-                              '_'+str(args.branch_hidden)+'_trunk_' + str(args.trunk_depth) + 
-                              '_'+str(args.trunk_hidden)+'_r'+ str(args.r))
+    result_dir = os.path.join(root_dir, 'nf'+str(args.batch)+'_nc'+str(args.nc) + '_branch_' + str(args.branch_depth) +
+                              '_'+str(args.branch_hidden)+'_trunk_' + str(args.trunk_depth) +
+                              '_'+str(args.trunk_hidden)+'_r'+ str(args.r) + '_mode_' + str(args.mode))
     
     # make dir
     os.makedirs(result_dir, exist_ok=True)
@@ -268,14 +316,14 @@ if __name__ == '__main__':
                                                            trunk_hidden=args.trunk_hidden, rank=args.r, key=subkey))
     elif args.model_name == 'DeepOHeat_v1':
         model = eqx.filter_jit(DeepOHeat_v1(dim=args.dim, branch_dim=args.branch_dim, field_dim=args.field_dim,
-                                                        branch_depth=args.branch_depth, branch_hidden=args.branch_hidden, trunk_depth=args.trunk_depth, 
-                                                        trunk_hidden=args.trunk_hidden, rank=args.r, key=subkey))
+                                                        branch_depth=args.branch_depth, branch_hidden=args.branch_hidden, trunk_depth=args.trunk_depth,
+                                                        trunk_hidden=args.trunk_hidden, rank=args.r, channels=args.channels, key=subkey))
     
     
     # Filter the model to get only the trainable parameters
     params = eqx.filter(model, eqx.is_array)
     # Count the total number of parameters by summing the size of each array
-    num_params = sum(jax.tree_util.tree_leaves(jax.tree_map(lambda x: x.size, params)))
+    num_params = sum(jax.tree_util.tree_leaves(jax.tree_util.tree_map(lambda x: x.size, params)))
     print(f'Total number of parameters: {num_params}')
     
     
@@ -292,7 +340,21 @@ if __name__ == '__main__':
     elif args.model_name == "DeepOHeat_ST" or args.model_name == "DeepOHeat_v1":
         train_generator = jax.jit(lambda key: deepoheat_st_train_generator(fs_train, args.batch, args.nc, key))
         test_generator = jax.jit(deepoheat_st_test_generator)
-        loss_fn = apply_model_deepoheat_st
+        if args.mode == '3d5':
+            # 3d5 模式：
+            #   - 损失只使用三通道输入中的功率段（前 branch_dim 个）
+            #   - PDE 残差使用分区 k 场（k_map.build_k_field 按训练网格构造）
+            power_dim = args.branch_dim
+            nx, nz = args.nc, (args.nc // 2) + 1
+            _xc = jnp.linspace(0, 1, nx).reshape(-1, 1)
+            _yc = jnp.linspace(0, 1, nx).reshape(-1, 1)
+            _zc = jnp.linspace(0, 0.5, nz).reshape(-1, 1)
+            k_field = build_k_field(_xc, _yc, _zc)  # [1, nx, nx, nz, 1]
+            print(f'[3d5] 分区 k 场已构造, 形状 {k_field.shape}')
+            loss_fn = lambda model, xc, yc, zc, fc: apply_model_deepoheat_st(model, xc, yc, zc, fc, power_dim=power_dim, k_field=k_field)
+        else:
+            # baseline 模式：power_dim=None, k_field=None，损失与原版完全一致
+            loss_fn = lambda model, xc, yc, zc, fc: apply_model_deepoheat_st(model, xc, yc, zc, fc)
     
     
     # train the model
