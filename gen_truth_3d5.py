@@ -200,18 +200,26 @@ def main():
         idx = (np.arange(NX) * 100.0 / (NX - 1)).astype(int)
         return f_orig[np.ix_(idx, idx)]
 
+    # 关键优化：矩阵 A 对所有样本相同（只 RHS 不同）
+    # 一次性 LU 分解，后续每次只做前代/回代（快很多）
+    print("LU 分解（一次性，可能较慢）...")
+    import time
+    t0 = time.time()
+    lu = spla.splu(A)
+    print(f"LU 分解完成, 耗时 {time.time()-t0:.1f}s")
+
     u_all = np.zeros((num, NX, NY, NZ))
     for s in range(num):
         f_map = downsample_f(fs_test_orig[s])  # [NX, NY]
         b = build_rhs(f_map)
 
-        # 用稀疏直接求解器 spsolve（精确、快；GMRES 在变系数 k 下收敛差）
-        sol = spla.spsolve(A, b)
+        # 用 LU 前代/回代求解（复用分解，远快于每次 spsolve）
+        sol = lu.solve(b)
         # 重排为 [NX, NY, NZ]
         u = sol.reshape(NZ, NX, NY).transpose(1, 2, 0)  # [NX, NY, NZ]
         u_all[s] = u
         if (s + 1) % 5 == 0 or s == num - 1:
-            print(f"  已完成 {s+1}/{num}, 温度范围 [{u.min():.3f}, {u.max():.3f}]")
+            print(f"  已完成 {s+1}/{num}, 耗时 {time.time()-t0:.1f}s, 温度范围 [{u.min():.3f}, {u.max():.3f}]")
 
     # 保存（带分辨率标识）
     # 101 分辨率用标准名 u_test_3d5.npy（heat_volumetric 3d5 模式自动读取）
