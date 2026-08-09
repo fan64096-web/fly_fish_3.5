@@ -68,22 +68,27 @@ def z_layer(zz):
 #########################################################################
 # 3. 横向 die 分区（die 层内 GPU / HBM 布局）
 #########################################################################
-# AI 芯片横向布局（占位，等 B 组真实布局替换）：
-#   2 行 × 3 列：中列 GPU（2块）+ 左右列 HBM（4块），die 间隙 = Interposer 上方
+# AI 芯片横向布局（MI300X-inspired benchmark，等 B 组真实布局替换）：
+#   4 个 Compute Die（中心 2×2）+ 4 个 HBM（四角）+ Interposer 上方边缘
 #   x ∈ [0,1], y ∈ [0,1]
-#   GPU 区域：中列 x ∈ [0.35, 0.65]
-#   HBM 区域：左右列 (x<0.35 或 x>0.65)
+#   Compute 区域：中心 x∈[0.3,0.7], y∈[0.3,0.7]（2×2 四个 die）
+#   HBM 区域：四角矩形
 #   die 间隙（十字线区域）= Interposer 上方，横向记 2
 def horizontal_region(xx, yy):
-    """返回横向区域类型：0=GPU, 1=HBM, 2=Interposer间隙。
+    """返回横向区域类型：0=ComputeDie, 1=HBM, 2=Interposer间隙。
 
     xx, yy : 同形状坐标。
     """
-    # GPU 中列
-    is_gpu = (xx >= 0.35) & (xx <= 0.65)
-    # HBM 左右列
-    is_hbm = (xx < 0.35) | (xx > 0.65)
-    return jnp.where(is_gpu, 0, jnp.where(is_hbm, 1, 2)).astype(jnp.int32)
+    # Compute Die：中心区
+    is_compute = (xx >= 0.3) & (xx <= 0.7) & (yy >= 0.3) & (yy <= 0.7)
+    # HBM 四角
+    is_hbm = (
+        ((xx < 0.3) & (yy < 0.3)) |   # 左下
+        ((xx > 0.7) & (yy < 0.3)) |   # 右下
+        ((xx < 0.3) & (yy > 0.7)) |   # 左上
+        ((xx > 0.7) & (yy > 0.7))     # 右上
+    )
+    return jnp.where(is_compute, 0, jnp.where(is_hbm, 1, 2)).astype(jnp.int32)
 
 
 #########################################################################

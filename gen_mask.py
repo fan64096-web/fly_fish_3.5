@@ -61,8 +61,8 @@ def make_horizontal_mask(n=N_SURFACE):
     """生成 AI 芯片横向 mask，返回 [n, n] float64 数组。
 
     材料类型（与 k_map.horizontal_region 一致）：
-        0 = GPU（中列 x∈[0.35,0.65]）
-        1 = HBM（左右列 x<0.35 或 x>0.65）
+        0 = Compute Die（中心 2×2）
+        1 = HBM（四角）
         2 = Interposer 间隙（die 之间，十字线）
 
     n 为任意分辨率（21 或 101 等）。
@@ -71,16 +71,21 @@ def make_horizontal_mask(n=N_SURFACE):
     y = np.linspace(0.0, 1.0, n)
     xx, yy = np.meshgrid(x, y, indexing='ij')
 
-    is_gpu = (xx >= 0.35) & (xx <= 0.65)
-    is_hbm = (xx < 0.35) | (xx > 0.65)
-    mask = np.where(is_gpu, 0, np.where(is_hbm, 1, 2)).astype(np.float64)
+    is_compute = (xx >= 0.3) & (xx <= 0.7) & (yy >= 0.3) & (yy <= 0.7)
+    is_hbm = (
+        ((xx < 0.3) & (yy < 0.3)) |
+        ((xx > 0.7) & (yy < 0.3)) |
+        ((xx < 0.3) & (yy > 0.7)) |
+        ((xx > 0.7) & (yy > 0.7))
+    )
+    mask = np.where(is_compute, 0, np.where(is_hbm, 1, 2)).astype(np.float64)
     return mask
 
 
 def make_horizontal_interface(n=N_SURFACE):
     """生成界面编码：die 间隙（Interposer 上方）记 1，其余记 0。
 
-    异质界面 = die 与 die 之间的间隙（Interposer 暴露区）。
+    异质界面 = Compute/HBM die 与 die 之间的间隙（Interposer 暴露区）。
     返回 [n, n] float64 数组。
     """
     x = np.linspace(0.0, 1.0, n)
@@ -88,9 +93,11 @@ def make_horizontal_interface(n=N_SURFACE):
     xx, yy = np.meshgrid(x, y, indexing='ij')
 
     interface = np.zeros((n, n), dtype=np.float64)
-    # die 间隙：x≈0.35 或 x≈0.65 的竖线
-    interface[np.isclose(xx, 0.35)] = 1.0
-    interface[np.isclose(xx, 0.65)] = 1.0
+    # die 间隙十字线：x≈0.3, 0.7 和 y≈0.3, 0.7
+    interface[np.isclose(xx, 0.3)] = 1.0
+    interface[np.isclose(xx, 0.7)] = 1.0
+    interface[np.isclose(yy, 0.3)] = 1.0
+    interface[np.isclose(yy, 0.7)] = 1.0
     return interface
 
 
