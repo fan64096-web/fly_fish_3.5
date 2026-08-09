@@ -23,7 +23,7 @@ def create_mesh(xi_batch, yi_batch, zi_batch):
 # Loss function
 #########################################################################
 @eqx.filter_jit
-def apply_model_deepoheat_st(model, xc, yc, zc, fc, lam_b=1., k_field=None, power_dim=None):
+def apply_model_deepoheat_st(model, xc, yc, zc, fc, lam_b=1., k_field=None, power_dim=None, nc=101):
 
     def PDE_loss(model, x, y, z, f):
         # compute u
@@ -39,11 +39,18 @@ def apply_model_deepoheat_st(model, xc, yc, zc, fc, lam_b=1., k_field=None, powe
         uy, uyy = hvp_fwdfwd(lambda y: model(((x, y, z), f)), (y,), (v_y,), True)
         uz, uzz = hvp_fwdfwd(lambda z: model(((x, y, z), f)), (z,), (v_z,), True)
 
+        # 网格参数（nc 驱动，支持任意分辨率）
+        nz = int(0.55 * nc + 0.45)           # z 层数
+        dz = 0.55 / (nz - 1)                 # z 步长
+        # 功率注入的 z 索引（物理 z 固定：0.10 / 0.11~0.14 / 0.15）
+        k_bot_inj = int(round(0.10 / dz))    # z=0.10
+        k_top_inj = int(round(0.15 / dz))    # z=0.15
+
         # PDE residual（volume 版原版按 z 分层注入功率与 k，3d5 模式在此基础上乘分区 k 场）
         laplacian = (uxx + uyy + uzz)
-        laplacian_bottom_power = laplacian[:,:,:,10:11,:] # z = 0.1, bottom interface
-        laplacian_interior_power = laplacian[:,:,:,11:15,:]
-        laplacian_top_power = laplacian[:,:,:,15:16,:] # z = 0.15, top interface
+        laplacian_bottom_power = laplacian[:,:,:,k_bot_inj:k_bot_inj+1,:]  # z=0.10
+        laplacian_interior_power = laplacian[:,:,:,k_bot_inj+1:k_top_inj,:]  # z=0.11~0.14
+        laplacian_top_power = laplacian[:,:,:,k_top_inj:k_top_inj+1,:]      # z=0.15
 
         # harmonic average
         k_bottom = 2 * 0.1 * 2 / (0.1 + 2)
@@ -56,19 +63,19 @@ def apply_model_deepoheat_st(model, xc, yc, zc, fc, lam_b=1., k_field=None, powe
 
         if k_field is not None:
             # 3d5 模式：各 z 段乘对应分区 k 场（k_field 形状 [1, nx, ny, nz, 1]）
-            top_pow  = k_field[:,:,:,15:16,:] * laplacian_top_power + f_power.reshape(-1, 101, 101, 1, 1)
-            int_pow  = k_field[:,:,:,11:15,:] * laplacian_interior_power + 2*f_power.reshape(-1, 101, 101, 1, 1)
-            bot_pow  = k_field[:,:,:,10:11,:] * laplacian_bottom_power + f_power.reshape(-1, 101, 101, 1, 1)
-            pde_res  = jnp.concatenate([k_field[:,:,:,16:,:]*laplacian[:,:,:,16:,:],
+            top_pow  = k_field[:,:,:,k_top_inj:k_top_inj+1,:] * laplacian_top_power + f_power.reshape(-1, nc, nc, 1, 1)
+            int_pow  = k_field[:,:,:,k_bot_inj+1:k_top_inj,:] * laplacian_interior_power + 2*f_power.reshape(-1, nc, nc, 1, 1)
+            bot_pow  = k_field[:,:,:,k_bot_inj:k_bot_inj+1,:] * laplacian_bottom_power + f_power.reshape(-1, nc, nc, 1, 1)
+            pde_res  = jnp.concatenate([k_field[:,:,:,k_top_inj+1:,:]*laplacian[:,:,:,k_top_inj+1:,:],
                                         top_pow, int_pow, bot_pow,
-                                        k_field[:,:,:,0:10,:]*laplacian[:,:,:,0:10,:]], axis=3)
+                                        k_field[:,:,:,0:k_bot_inj,:]*laplacian[:,:,:,0:k_bot_inj,:]], axis=3)
         else:
             # baseline 模式：原版分段（各 z 段固定 k）
-            pde_res = jnp.concatenate([0.1*laplacian[:,:,:,16:,:],
-                                        k_top*laplacian_top_power+f_power.reshape(-1, 101, 101, 1, 1),
-                                        k_interior*laplacian_interior_power+2*f_power.reshape(-1, 101, 101, 1, 1),
-                                        k_bottom*laplacian_bottom_power+f_power.reshape(-1, 101, 101, 1, 1),
-                                        0.1*laplacian[:,:,:,0:10,:]
+            pde_res = jnp.concatenate([0.1*laplacian[:,:,:,k_top_inj+1:,:],
+                                        k_top*laplacian_top_power+f_power.reshape(-1, nc, nc, 1, 1),
+                                        k_interior*laplacian_interior_power+2*f_power.reshape(-1, nc, nc, 1, 1),
+                                        k_bottom*laplacian_bottom_power+f_power.reshape(-1, nc, nc, 1, 1),
+                                        0.1*laplacian[:,:,:,0:k_bot_inj,:]
                 ],axis=3)
         pde_res = jnp.mean(pde_res**2)
 
@@ -81,16 +88,17 @@ def apply_model_deepoheat_st(model, xc, yc, zc, fc, lam_b=1., k_field=None, powe
         bc_other = jnp.mean((uy[:,:,0,:,:])**2) + jnp.mean((uy[:,:,-1,:,:])**2) + jnp.mean((ux[:,0,:,:,:])**2) + jnp.mean((ux[:,-1,:,:,:])**2)
 
         # 界面热流连续：界面两侧 k·∂u/∂n 相等（3d5 模式启用，baseline 禁用）
-        #   volume 网格 101×101，x/y 界面在索引 50
+        #   x/y 界面在坐标 0.5，网格索引 = round(0.5*(nc-1))
         if k_field is not None:
-            k_left_x  = k_field[:, 49:50, :, :, :]
-            k_right_x = k_field[:, 50:51, :, :, :]
-            ux_left   = ux[:, 49:50, :, :, :]
-            ux_right  = ux[:, 50:51, :, :, :]
-            k_down_y  = k_field[:, :, 49:50, :, :]
-            k_up_y    = k_field[:, :, 50:51, :, :]
-            uy_down   = uy[:, :, 49:50, :, :]
-            uy_up     = uy[:, :, 50:51, :, :]
+            k_iface = int(round(0.5 * (nc - 1)))   # 界面索引（nc 驱动）
+            k_left_x  = k_field[:, k_iface-1:k_iface, :, :, :]
+            k_right_x = k_field[:, k_iface:k_iface+1, :, :, :]
+            ux_left   = ux[:, k_iface-1:k_iface, :, :, :]
+            ux_right  = ux[:, k_iface:k_iface+1, :, :, :]
+            k_down_y  = k_field[:, :, k_iface-1:k_iface, :, :]
+            k_up_y    = k_field[:, :, k_iface:k_iface+1, :, :]
+            uy_down   = uy[:, :, k_iface-1:k_iface, :, :]
+            uy_up     = uy[:, :, k_iface:k_iface+1, :, :]
             interface_loss = jnp.mean((k_left_x*ux_left - k_right_x*ux_right)**2) + \
                              jnp.mean((k_down_y*uy_down - k_up_y*uy_up)**2)
         else:
@@ -141,12 +149,12 @@ def deepoheat_st_train_generator(fs, batch, nc, key):
 #########################################################################
 # Test generator
 #########################################################################
-@jax.jit
-def deepoheat_st_test_generator(fs, u):
-
-    x = jnp.linspace(0, 1, 101).reshape(-1,1)
-    y = jnp.linspace(0, 1, 101).reshape(-1,1)
-    z = jnp.linspace(0, 0.55, 56).reshape(-1,1)
+@partial(jax.jit, static_argnums=(2,))
+def deepoheat_st_test_generator(fs, u, nc=101):
+    nz = int(0.55 * nc + 0.45)
+    x = jnp.linspace(0, 1, nc).reshape(-1,1)
+    y = jnp.linspace(0, 1, nc).reshape(-1,1)
+    z = jnp.linspace(0, 0.55, nz).reshape(-1,1)
     return x, y, z, fs, u
 
 
@@ -265,7 +273,7 @@ if __name__ == '__main__':
     # train/test generator
  
     train_generator = lambda key: deepoheat_st_train_generator(fs_train, args.batch, args.nc, key)
-    test_generator = jax.jit(deepoheat_st_test_generator)
+    test_generator = jax.jit(lambda fs, u: deepoheat_st_test_generator(fs, u, args.nc))
     if args.mode == '3d5':
         # 3d5 模式：PDE 残差使用分区 k 场
         nx, nz = args.nc, int(0.55*args.nc + 0.45)
@@ -274,10 +282,10 @@ if __name__ == '__main__':
         _zc = jnp.linspace(0, 0.55, nz).reshape(-1, 1)
         k_field = build_k_field(_xc, _yc, _zc)  # [1, nx, nx, nz, 1]
         print(f'[3d5] 分区 k 场已构造, 形状 {k_field.shape}')
-        loss_fn = lambda model, xc, yc, zc, fc: apply_model_deepoheat_st(model, xc, yc, zc, fc, k_field=k_field, power_dim=101**2)
+        loss_fn = lambda model, xc, yc, zc, fc: apply_model_deepoheat_st(model, xc, yc, zc, fc, k_field=k_field, power_dim=args.nc**2, nc=args.nc)
     else:
         # baseline 模式：与原版完全一致
-        loss_fn = apply_model_deepoheat_st
+        loss_fn = lambda model, xc, yc, zc, fc: apply_model_deepoheat_st(model, xc, yc, zc, fc, nc=args.nc)
   
 
     # train the model
