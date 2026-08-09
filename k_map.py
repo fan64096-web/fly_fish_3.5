@@ -27,69 +27,89 @@ import jax.numpy as jnp
 
 
 #########################################################################
-# 1. mask → k 原始映射表（用户给定，保留原始值并注明缩放）
+# 1. 材料 → k 映射表（AI 芯片 3.5D，行业标准值）
 #########################################################################
-# 区域 ID → 原始热导率 k [W/(m·K)]
-#   区域 0 : k = 130   （芯片 1）
-#   区域 1 : k = 130   （芯片 1）
-#   区域 2 : k = 150   （芯片 2，略高）
-#   区域 3 : k = 1.5   （封装/中介层，导热差）
-K_REGION = {0: 130.0, 1: 130.0, 2: 150.0, 3: 1.5}
+# 材料类型 ID → 热导率 k [W/(m·K)]
+#   0 = GPU Chiplet（硅）    k = 130
+#   1 = HBM（硅）            k = 130
+#   2 = Interposer（中介层）  k = 130
+#   3 = Substrate（基板）     k = 0.5
+#   4 = TIM（热界面材料）     k = 2.0
+K_MATERIAL = {0: 130.0, 1: 130.0, 2: 130.0, 3: 0.5, 4: 2.0}
 
 # 参与训练时的缩放系数（见模块顶部说明）
 K_SCALE = 100.0
 
-# 查表用数组：索引 = 区域 ID
-K_REGION_ARRAY = jnp.array([K_REGION[i] for i in sorted(K_REGION.keys())], dtype=jnp.float32)
+# 查表用数组：索引 = 材料类型 ID
+K_MATERIAL_ARRAY = jnp.array([K_MATERIAL[i] for i in sorted(K_MATERIAL.keys())], dtype=jnp.float32)
 
 
 #########################################################################
-# 2. z 方向分层系数（不同 z 层乘不同 k）
+# 2. z 方向分层（纵向层边界，物理坐标 z）
 #########################################################################
-# 默认：把 z ∈ [0, 0.5]（surface 高度）分成 3 段，自下而上：
-#   底层 z < 0.17 : 系数 1.0  （靠近散热面，等效导热好）
-#   中层 < 0.33   : 系数 0.7
-#   顶层 >= 0.33  : 系数 0.5  （远离散热面）
-# 说明：这些是示例值，可按实际材料分层修改（改 Z_BREAKS / Z_FACTORS 即可）。
-Z_BREAKS = (0.17, 0.33)          # 分段边界
-Z_FACTORS = (1.0, 0.7, 0.5)       # 各段系数
+# AI 芯片 3.5D 纵向结构（自下而上 z 增）：
+#   底层 z < 0.1     : Substrate（基板）
+#   中层 0.1~0.35    : Interposer（中介层）
+#   上层 0.35~0.4    : TIM（热界面材料）
+#   顶层 z > 0.4     : die 层（GPU/HBM，横向分区）
+# 说明：这些是占位边界，等真实层结构替换。
+Z_SUB_TOP   = 0.10   # Substrate 顶
+Z_INT_TOP   = 0.35   # Interposer 顶
+Z_TIM_TOP   = 0.40   # TIM 顶
 
 
-def z_factor(z):
-    """按 z 坐标返回分层系数，与 z 同形状。
+def z_layer(zz):
+    """按 z 坐标返回层类型（Substrate=3, Interposer=2, TIM=4, die层=特殊）。"""
+    return jnp.where(zz < Z_SUB_TOP, 3,
+           jnp.where(zz < Z_INT_TOP, 2,
+           jnp.where(zz < Z_TIM_TOP, 4, -1)))  # -1 = die 层，由横向决定
 
-    z : 任意形状数组，取值 [0, 0.5]（surface）或 [0, 0.55]（volume）。
+
+#########################################################################
+# 3. 横向 die 分区（die 层内 GPU / HBM 布局）
+#########################################################################
+# AI 芯片横向布局（占位，等 B 组真实布局替换）：
+#   2 行 × 3 列：中列 GPU（2块）+ 左右列 HBM（4块），die 间隙 = Interposer 上方
+#   x ∈ [0,1], y ∈ [0,1]
+#   GPU 区域：中列 x ∈ [0.35, 0.65]
+#   HBM 区域：左右列 (x<0.35 或 x>0.65)
+#   die 间隙（十字线区域）= Interposer 上方，横向记 2
+def horizontal_region(xx, yy):
+    """返回横向区域类型：0=GPU, 1=HBM, 2=Interposer间隙。
+
+    xx, yy : 同形状坐标。
     """
-    return jnp.where(
-        z < Z_BREAKS[0], Z_FACTORS[0],
-        jnp.where(z < Z_BREAKS[1], Z_FACTORS[1], Z_FACTORS[2]))
+    # GPU 中列
+    is_gpu = (xx >= 0.35) & (xx <= 0.65)
+    # HBM 左右列
+    is_hbm = (xx < 0.35) | (xx > 0.65)
+    return jnp.where(is_gpu, 0, jnp.where(is_hbm, 1, 2)).astype(jnp.int32)
 
 
 #########################################################################
-# 3. 区域 ID 计算（从坐标，2×2 布局）
+# 4. 材料 ID 计算（三维：横向 die + 纵向层）
 #########################################################################
-def region_id(xx, yy):
-    """根据 (x, y) 坐标返回区域 ID。
+def material_id(xx, yy, zz):
+    """返回每个 (x,y,z) 点的材料类型 ID（0-4）。
 
-    2×2 布局（与 gen_mask.py 一致）：
-        左下 = 0，右下 = 1，左上 = 2，右上 = 3
-    公式：ID = (y>=0.5)*2 + (x>=0.5)
-        - 左下 (x<.5, y<.5): 0*2+0 = 0
-        - 右下 (x≥.5, y<.5): 0*2+1 = 1
-        - 左上 (x<.5, y≥.5): 1*2+0 = 2
-        - 右上 (x≥.5, y≥.5): 1*2+1 = 3
-
-    xx, yy : 同形状的坐标数组（可由 meshgrid 得到）。
-    返回 : 与 xx 同形状的 int32 数组。
+    规则：
+      - die 层（zz >= Z_TIM_TOP）：横向 GPU=0 / HBM=1
+      - Interposer 层：2
+      - Substrate 层：3
+      - TIM 层：4
     """
-    return (yy >= 0.5).astype(jnp.int32) * 2 + (xx >= 0.5).astype(jnp.int32)
+    layer = z_layer(zz)                        # 3/2/4/-1
+    h_region = horizontal_region(xx, yy)       # 0/1/2
+
+    # die 层用横向分区，其他层用固定材料
+    return jnp.where(layer == -1, h_region, layer)
 
 
 #########################################################################
-# 4. 构造 k 场 k(x, y, z)
+# 5. 构造 k 场 k(x, y, z)
 #########################################################################
 def build_k_field(xc, yc, zc):
-    """从坐标网格构造 k 场。
+    """从坐标网格构造 k 场（三维材料查表）。
 
     参数
     ----
@@ -99,34 +119,16 @@ def build_k_field(xc, yc, zc):
 
     返回
     ----
-    [1, nx, ny, nz, 1] 的 float32 数组，已乘 z 分层系数、已除以 K_SCALE。
+    [1, nx, ny, nz, 1] 的 float32 数组，已除以 K_SCALE。
     第 0 维和最后 1 维为广播维，可与模型输出 [batch, nx, ny, nz, 1] 直接相乘。
     """
     xx, yy, zz = jnp.meshgrid(xc.ravel(), yc.ravel(), zc.ravel(), indexing='ij')
 
-    # 水平：区域 ID 查表 → 区域基础 k
-    rid = region_id(xx, yy)                      # [nx, ny, nz]
-    k_reg = K_REGION_ARRAY[rid]                  # 查表，[nx, ny, nz]
-
-    # 垂直：z 分层系数
-    k = k_reg * z_factor(zz)                     # [nx, ny, nz]
+    # 三维材料查表
+    mid = material_id(xx, yy, zz)              # [nx, ny, nz]
+    k = K_MATERIAL_ARRAY[mid]                  # [nx, ny, nz]
 
     # 缩放（数值稳定）
     k = k / K_SCALE
 
-    return k[None, ..., None]                    # [1, nx, ny, nz, 1]
-
-
-def build_k_field_from_mask(mask_2d, zc):
-    """从 2D mask 数组 + z 坐标构造 k 场（备用接口，mask 已知时用）。
-
-    mask_2d : [nx, ny] 区域 ID 数组
-    zc      : [nz, 1]  z 坐标列向量
-    返回    : [1, nx, ny, nz, 1]
-    """
-    rid = mask_2d.astype(jnp.int32)              # [nx, ny]
-    k_reg = K_REGION_ARRAY[rid]                  # [nx, ny]
-    zz = zc.ravel()[None, None, :]               # [1, 1, nz]
-    k = k_reg[:, :, None] * z_factor(zz)[None, :, :]
-    k = k / K_SCALE
-    return k[None, ..., None]
+    return k[None, ..., None]                  # [1, nx, ny, nz, 1]

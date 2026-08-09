@@ -9,24 +9,20 @@ DeepOHeat-V1 改造 · 阶段 1：生成 3.5D 区域掩码（mask）与界面编
   1. mask       : 区域掩码，告诉模型每个 (x, y) 位置属于哪个区域（chiplet）
   2. interface  : 界面编码，告诉模型每个 (x, y) 位置是否在区域交界处
 
-几何设定（第一阶段，简单 2×2 布局）
------------------------------------
-把芯片平面（归一化坐标 [0,1]×[0,1]）切成 2×2 四块矩形区域：
+几何设定（AI 芯片 3.5D 布局，贴合产品实际）
+-------------------------------------------
+横向：2 GPU + 4 HBM + Interposer 边缘（对应 k_map.horizontal_region）
 
         y=1
-      ┌──────┬──────┐
-      │ 区域2 │ 区域3 │
-      │ (x<.5│ (x≥.5│
-      │ y≥.5)│ y≥.5)│
-      ├──────┼──────┤   ← y=0.5（界面线）
-      │ 区域0 │ 区域1 │
-      │ (x<.5│ (x≥.5│
-      │ y<.5)│ y<.5)│
-      └──────┴──────┘
-   x=0            x=0.5      x=1
+      ┌───────────────┐
+      │ HBM │ GPU │ HBM│
+      │-----+-----+----│
+      │ HBM │ GPU │ HBM│
+      └───────────────┘
+   x=0             x=1
 
-  - mask      : 每格填区域 ID（0/1/2/3）
-  - interface : 落在 x=0.5 或 y=0.5 交界线上的点记 1，其余记 0
+  - mask      : 每个 (x,y) 的横向材料类型（0=GPU, 1=HBM, 2=Interposer边缘）
+  - interface : GPU/HBM 边界 + 芯片边缘（Interposer 边缘）记 1
 
 产物（写入 data/ 目录）
 -----------------------
@@ -61,32 +57,30 @@ REGION_IDS = (0, 1, 2, 3)  # 四个区域的 ID
 # ---------------------------------------------------------------------
 # 掩码 / 界面生成
 # ---------------------------------------------------------------------
-def make_2x2_mask(n=N_SURFACE):
-    """生成 2×2 四块区域掩码，返回 [n, n] float64 数组。
+def make_horizontal_mask(n=N_SURFACE):
+    """生成 AI 芯片横向 mask，返回 [n, n] float64 数组。
 
-    区域编号（以屏幕视角、y 向上）：
-        区域0 = 左下（x<0.5, y<0.5）
-        区域1 = 右下（x≥0.5, y<0.5）
-        区域2 = 左上（x<0.5, y≥0.5）
-        区域3 = 右上（x≥0.5, y≥0.5）
+    材料类型（与 k_map.horizontal_region 一致）：
+        0 = GPU（中列 x∈[0.35,0.65]）
+        1 = HBM（左右列 x<0.35 或 x>0.65）
+        2 = Interposer 间隙（die 之间，十字线）
 
     n 为任意分辨率（21 或 101 等）。
     """
     x = np.linspace(0.0, 1.0, n)
     y = np.linspace(0.0, 1.0, n)
-    xx, yy = np.meshgrid(x, y, indexing='ij')   # xx[i,j]=x[i], yy[i,j]=y[j]
+    xx, yy = np.meshgrid(x, y, indexing='ij')
 
-    mask = np.zeros((n, n), dtype=np.float64)
-    mask[(xx >= 0.5) & (yy < 0.5)] = REGION_IDS[1]   # 右下
-    mask[(xx < 0.5) & (yy >= 0.5)] = REGION_IDS[2]   # 左上
-    mask[(xx >= 0.5) & (yy >= 0.5)] = REGION_IDS[3]  # 右上
-    # 左下默认已为 0
+    is_gpu = (xx >= 0.35) & (xx <= 0.65)
+    is_hbm = (xx < 0.35) | (xx > 0.65)
+    mask = np.where(is_gpu, 0, np.where(is_hbm, 1, 2)).astype(np.float64)
     return mask
 
 
-def make_2x2_interface(n=N_SURFACE):
-    """生成界面编码：落在 x=0.5 或 y=0.5 交界线上的点记 1，其余记 0。
+def make_horizontal_interface(n=N_SURFACE):
+    """生成界面编码：die 间隙（Interposer 上方）记 1，其余记 0。
 
+    异质界面 = die 与 die 之间的间隙（Interposer 暴露区）。
     返回 [n, n] float64 数组。
     """
     x = np.linspace(0.0, 1.0, n)
@@ -94,9 +88,9 @@ def make_2x2_interface(n=N_SURFACE):
     xx, yy = np.meshgrid(x, y, indexing='ij')
 
     interface = np.zeros((n, n), dtype=np.float64)
-    # 用 isclose 做精确比较，避免浮点误差
-    interface[np.isclose(xx, 0.5)] = 1.0
-    interface[np.isclose(yy, 0.5)] = 1.0
+    # die 间隙：x≈0.35 或 x≈0.65 的竖线
+    interface[np.isclose(xx, 0.35)] = 1.0
+    interface[np.isclose(xx, 0.65)] = 1.0
     return interface
 
 
@@ -107,8 +101,8 @@ def build_surface_3d5_data():
     os.makedirs(DATA_DIR, exist_ok=True)
 
     # 1) 生成掩码与界面，并单独保存（便于人工检查）
-    mask = make_2x2_mask(N_SURFACE).reshape(-1)          # [441]
-    interface = make_2x2_interface(N_SURFACE).reshape(-1)  # [441]
+    mask = make_horizontal_mask(N_SURFACE).reshape(-1)          # [441]
+    interface = make_horizontal_interface(N_SURFACE).reshape(-1)  # [441]
     np.save(os.path.join(DATA_DIR, 'mask_surface.npy'), mask)
     np.save(os.path.join(DATA_DIR, 'interface_surface.npy'), interface)
     print(f'[gen_mask] mask_surface.npy      形状 {mask.shape}, 取值 {np.unique(mask)}')
@@ -164,8 +158,8 @@ def build_volume_3d5_data():
     os.makedirs(DATA_DIR, exist_ok=True)
 
     # 1) 生成掩码与界面（复用 2×2 几何，分辨率 101）
-    mask = make_2x2_mask(N_VOLUME).reshape(-1)          # [10201]
-    interface = make_2x2_interface(N_VOLUME).reshape(-1)  # [10201]
+    mask = make_horizontal_mask(N_VOLUME).reshape(-1)          # [10201]
+    interface = make_horizontal_interface(N_VOLUME).reshape(-1)  # [10201]
     np.save(os.path.join(DATA_DIR, 'mask_volume.npy'), mask)
     np.save(os.path.join(DATA_DIR, 'interface_volume.npy'), interface)
     print(f'[gen_mask] mask_volume.npy      形状 {mask.shape}, 取值 {np.unique(mask)}')
