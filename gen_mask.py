@@ -60,10 +60,11 @@ REGION_IDS = (0, 1, 2, 3)  # 四个区域的 ID
 def make_horizontal_mask(n=N_SURFACE):
     """生成 AI 芯片横向 mask，返回 [n, n] float64 数组。
 
-    材料类型（与 k_map 一致），按材料/功能分类：
+    mask 通道 = 材料/功能区域分类（0~4），与 k_map 一致：
         0 = Compute Die（中心 2×2）
         1 = HBM（四角）
         2 = Interposer（die 之间的间隙区域，材料为中介层）
+        （Substrate=3, TIM=4 由纵向层定义，见 k_map.material_id）
 
     无独立"间隙"区域；间隙归为 Interposer 材料（ID=2）。
     interface 通道单独标记界面，不作为区域 ID。

@@ -77,6 +77,8 @@ def z_layer(zz):
 def horizontal_region(xx, yy):
     """返回横向区域类型：0=ComputeDie, 1=HBM, 2=Interposer。
 
+    这是 die 层的横向材料分区（0~2）；
+    Substrate=3、TIM=4 由纵向层定义（见 material_id）。
     非 die 区（间隙）归为 Interposer 材料；interface 通道独立标记界面。
     xx, yy : 同形状坐标。
     """
@@ -112,7 +114,39 @@ def material_id(xx, yy, zz):
 
 
 #########################################################################
-# 5. 构造 k 场 k(x, y, z)
+# 5. interface 类型（异质界面分类，预留多类别）
+#########################################################################
+# interface 通道语义：
+#   0 = 非界面
+#   1 = Die-TIM 界面（纵向）
+#   2 = TIM-Interposer 界面（纵向）
+#   3 = Interposer-Substrate 界面（纵向）
+# 便于论文按界面类型分析误差。
+# surface 2D 阶段：只用 0/1（1 = die 边界，横向）
+def interface_type(zz):
+    """按 z 坐标返回界面类型。
+
+    zz : 任意形状数组（物理坐标 z）。
+    返回与 zz 同形状的 int32 数组。
+    """
+    # 界面在层边界附近：取层边界两侧的薄层
+    # die层底部 ≈ Z_TIM_TOP（Die-TIM 界面）
+    # TIM 底部 ≈ Z_INT_TOP（TIM-Interposer 界面）
+    # Interposer 底部 ≈ Z_SUB_TOP（Interposer-Substrate 界面）
+    # 简化：用 z 落在边界上的薄带（±2% 厚度）标记
+    eps = 0.01  # 界面薄层厚度
+
+    is_die_tim     = (zz >= Z_TIM_TOP - eps) & (zz <= Z_TIM_TOP + eps)
+    is_tim_int     = (zz >= Z_INT_TOP - eps) & (zz <= Z_INT_TOP + eps)
+    is_int_sub     = (zz >= Z_SUB_TOP - eps) & (zz <= Z_SUB_TOP + eps)
+
+    return jnp.where(is_die_tim, 1,
+           jnp.where(is_tim_int, 2,
+           jnp.where(is_int_sub, 3, 0))).astype(jnp.int32)
+
+
+#########################################################################
+# 6. 构造 k 场 k(x, y, z)
 #########################################################################
 def build_k_field(xc, yc, zc):
     """从坐标网格构造 k 场（三维材料查表）。
