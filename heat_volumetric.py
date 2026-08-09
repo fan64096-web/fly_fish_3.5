@@ -23,7 +23,7 @@ def create_mesh(xi_batch, yi_batch, zi_batch):
 # Loss function
 #########################################################################
 @eqx.filter_jit
-def apply_model_deepoheat_st(model, xc, yc, zc, fc, lam_b=1., k_field=None):
+def apply_model_deepoheat_st(model, xc, yc, zc, fc, lam_b=1., k_field=None, power_dim=None):
 
     def PDE_loss(model, x, y, z, f):
         # compute u
@@ -50,20 +50,24 @@ def apply_model_deepoheat_st(model, xc, yc, zc, fc, lam_b=1., k_field=None):
         k_interior = 0.1
         k_top = 0.1
 
+        # 3.5D 模式：f 是三通道拼接 [功率|掩码|界面]，功率注入只用功率段
+        # baseline 模式：power_dim=None，f 即纯功率，行为与原版一致
+        f_power = f[..., :power_dim] if power_dim is not None else f
+
         if k_field is not None:
             # 3d5 模式：各 z 段乘对应分区 k 场（k_field 形状 [1, nx, ny, nz, 1]）
-            top_pow  = k_field[:,:,:,15:16,:] * laplacian_top_power + f.reshape(-1, 101, 101, 1, 1)
-            int_pow  = k_field[:,:,:,11:15,:] * laplacian_interior_power + 2*f.reshape(-1, 101, 101, 1, 1)
-            bot_pow  = k_field[:,:,:,10:11,:] * laplacian_bottom_power + f.reshape(-1, 101, 101, 1, 1)
+            top_pow  = k_field[:,:,:,15:16,:] * laplacian_top_power + f_power.reshape(-1, 101, 101, 1, 1)
+            int_pow  = k_field[:,:,:,11:15,:] * laplacian_interior_power + 2*f_power.reshape(-1, 101, 101, 1, 1)
+            bot_pow  = k_field[:,:,:,10:11,:] * laplacian_bottom_power + f_power.reshape(-1, 101, 101, 1, 1)
             pde_res  = jnp.concatenate([k_field[:,:,:,16:,:]*laplacian[:,:,:,16:,:],
                                         top_pow, int_pow, bot_pow,
                                         k_field[:,:,:,0:10,:]*laplacian[:,:,:,0:10,:]], axis=3)
         else:
             # baseline 模式：原版分段（各 z 段固定 k）
             pde_res = jnp.concatenate([0.1*laplacian[:,:,:,16:,:],
-                                        k_top*laplacian_top_power+f.reshape(-1, 101, 101, 1, 1),
-                                        k_interior*laplacian_interior_power+2*f.reshape(-1, 101, 101, 1, 1),
-                                        k_bottom*laplacian_bottom_power+f.reshape(-1, 101, 101, 1, 1),
+                                        k_top*laplacian_top_power+f_power.reshape(-1, 101, 101, 1, 1),
+                                        k_interior*laplacian_interior_power+2*f_power.reshape(-1, 101, 101, 1, 1),
+                                        k_bottom*laplacian_bottom_power+f_power.reshape(-1, 101, 101, 1, 1),
                                         0.1*laplacian[:,:,:,0:10,:]
                 ],axis=3)
         pde_res = jnp.mean(pde_res**2)
@@ -108,19 +112,29 @@ def apply_model_deepoheat_st(model, xc, yc, zc, fc, lam_b=1., k_field=None):
 #########################################################################
 # Train generator
 #########################################################################
-@partial(jax.jit, static_argnums=(1,2))
+# 注意：这个函数不能用 jax.jit，否则 JAX 会把整个 memmap 数组（24GB）
+# 捕获成编译常量，导致 OOM。改用 numpy 随机采样，只把 batch 数据转成 jax 数组。
+# 调用处也必须是普通 lambda（不能包 jax.jit）。
 def deepoheat_st_train_generator(fs, batch, nc, key):
-    
+    """返回坐标网格与 batch 个功率映射（jax 数组）。
+
+    fs 为 numpy/memmap 数组（CPU），这里用 numpy 采样避免 JAX 常量捕获。
+    """
     nx = nc
     ny = nc
     nz = int(0.55*nc + 0.45)
-    key, _ = jax.random.split(key)
-    idx = jax.random.choice(key, fs.shape[0], (batch,), replace=False)
-    fc = fs[idx,:]
+
+    # 用 numpy 随机采样（fs 是 memmap，读入 batch 行不占太多内存）
+    # key 是 jax PRNG key（[2] uint32 数组），转成 numpy 标量作为 numpy 采样种子
+    seed = int(np.asarray(key[0]))
+    idx = np.random.default_rng(seed).choice(fs.shape[0], size=batch, replace=False)
+    fc = np.asarray(fs[idx, :])            # [batch, dim]，转成 numpy 数组
+    fc = jnp.asarray(fc)                   # 再转 jax 数组
+
     xc = jnp.linspace(0, 1, nx).reshape(-1,1)
     yc = jnp.linspace(0, 1, ny).reshape(-1,1)
     zc = jnp.linspace(0, 0.55, nz).reshape(-1,1)
-    
+
     return xc, yc, zc, fc
 
 
@@ -168,21 +182,25 @@ if __name__ == '__main__':
 
 
     # 数据加载：按 mode 选择 Branch 输入通道
+    # 注意：必须用 np.load(mmap_mode='r') 而不是 jnp.load！
+    #   jnp.load 返回 JAX 数组，np.asarray(fs[idx,:]) 会触发全量 GPU 传输导致 OOM。
+    #   np.load(mmap_mode='r') 返回 numpy memmap，索引只读 batch 行，不碰 GPU。
     if args.mode == '3d5':
         # 3.5D 模式：功率+掩码+界面 三通道（数据由 gen_mask.py 的 volume 版生成）
-        # 用 mmap_mode 加载：24GB 数据不一次性进内存，按需取行（train_generator 只取 batch 行）
-        fs_train = jnp.load('data/fs_train_3d5_volume.npy', mmap_mode='r')
-        fs_test = jnp.load('data/fs_test_3d5_volume.npy', mmap_mode='r')
+        # 注意：fs_train_3d5_volume.npy 是 gen_mask 生成的 [N, 3*101**2]，已是二维
+        fs_train = np.load('data/fs_train_3d5_volume.npy', mmap_mode='r').reshape(-1, 3*101**2)
+        fs_test = np.load('data/fs_test_3d5_volume.npy', mmap_mode='r').reshape(-1, 3*101**2)
         args.channels = 3
         if args.model_name != 'DeepOHeat_v1':
             print(f'[mode=3d5] 仅支持 DeepOHeat_v1，已强制切换（原为 {args.model_name}）')
             args.model_name = 'DeepOHeat_v1'
     else:
         # baseline 模式：仅功率（原版），也用 memmap 降低内存
-        fs_train = jnp.load('data/fs_train_volume.npy', mmap_mode='r')
-        fs_test = jnp.load('data/fs_test_volume.npy', mmap_mode='r')
+        # 注意：fs_train_volume.npy 原始形状是 [N, 101, 101]，必须 reshape 成 [N, 101**2]
+        fs_train = np.load('data/fs_train_volume.npy', mmap_mode='r').reshape(-1, 101**2)
+        fs_test = np.load('data/fs_test_volume.npy', mmap_mode='r').reshape(-1, 101**2)
         args.channels = 1
-    u_test = jnp.load('data/u_test_volume.npy')
+    u_test = np.load('data/u_test_volume.npy')
 
     # result dir
     root_dir = os.path.join(os.getcwd(), 'results', 'results_volume', args.model_name)
@@ -246,7 +264,7 @@ if __name__ == '__main__':
 
     # train/test generator
  
-    train_generator = jax.jit(lambda key: deepoheat_st_train_generator(fs_train, args.batch, args.nc, key))
+    train_generator = lambda key: deepoheat_st_train_generator(fs_train, args.batch, args.nc, key)
     test_generator = jax.jit(deepoheat_st_test_generator)
     if args.mode == '3d5':
         # 3d5 模式：PDE 残差使用分区 k 场
@@ -256,7 +274,7 @@ if __name__ == '__main__':
         _zc = jnp.linspace(0, 0.55, nz).reshape(-1, 1)
         k_field = build_k_field(_xc, _yc, _zc)  # [1, nx, nx, nz, 1]
         print(f'[3d5] 分区 k 场已构造, 形状 {k_field.shape}')
-        loss_fn = lambda model, xc, yc, zc, fc: apply_model_deepoheat_st(model, xc, yc, zc, fc, k_field=k_field)
+        loss_fn = lambda model, xc, yc, zc, fc: apply_model_deepoheat_st(model, xc, yc, zc, fc, k_field=k_field, power_dim=101**2)
     else:
         # baseline 模式：与原版完全一致
         loss_fn = apply_model_deepoheat_st
