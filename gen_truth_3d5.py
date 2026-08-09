@@ -214,7 +214,12 @@ def main():
             print(f"  已完成 {s+1}/{num}, 温度范围 [{u.min():.3f}, {u.max():.3f}]")
 
     # 保存（带分辨率标识）
-    out = f'data/u_test_3d5_{NX}x{NX}x{NZ}.npy'
+    # 101 分辨率用标准名 u_test_3d5.npy（heat_volumetric 3d5 模式自动读取）
+    # 其他分辨率带后缀，避免覆盖
+    if NX == 101:
+        out = 'data/u_test_3d5.npy'
+    else:
+        out = f'data/u_test_3d5_{NX}x{NX}x{NZ}.npy'
     np.save(out, u_all)
     print(f"已保存 {out}, 形状 {u_all.shape}")
 

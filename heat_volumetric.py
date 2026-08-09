@@ -208,7 +208,12 @@ if __name__ == '__main__':
         fs_train = np.load('data/fs_train_volume.npy', mmap_mode='r').reshape(-1, 101**2)
         fs_test = np.load('data/fs_test_volume.npy', mmap_mode='r').reshape(-1, 101**2)
         args.channels = 1
-    u_test = np.load('data/u_test_volume.npy')
+    # 评估真值：baseline 用原版真值；3d5 用自洽真值（gen_truth_3d5.py 生成，若存在）
+    if args.mode == '3d5' and os.path.exists('data/u_test_3d5.npy'):
+        u_test = np.load('data/u_test_3d5.npy')
+        print('[3d5] 使用自洽真值 data/u_test_3d5.npy 评估')
+    else:
+        u_test = np.load('data/u_test_volume.npy')
 
     # result dir
     root_dir = os.path.join(os.getcwd(), 'results', 'results_volume', args.model_name)
