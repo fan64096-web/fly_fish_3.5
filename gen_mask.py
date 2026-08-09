@@ -60,12 +60,13 @@ REGION_IDS = (0, 1, 2, 3)  # 四个区域的 ID
 def make_horizontal_mask(n=N_SURFACE):
     """生成 AI 芯片横向 mask，返回 [n, n] float64 数组。
 
-    材料类型（与 k_map.horizontal_region 一致）：
+    材料类型（与 k_map 一致），按材料/功能分类：
         0 = Compute Die（中心 2×2）
         1 = HBM（四角）
-        2 = Interposer 间隙（die 之间，十字线）
+        2 = Interposer（die 之间的间隙区域，材料为中介层）
 
-    n 为任意分辨率（21 或 101 等）。
+    无独立"间隙"区域；间隙归为 Interposer 材料（ID=2）。
+    interface 通道单独标记界面，不作为区域 ID。
     """
     x = np.linspace(0.0, 1.0, n)
     y = np.linspace(0.0, 1.0, n)
@@ -78,6 +79,7 @@ def make_horizontal_mask(n=N_SURFACE):
         ((xx < 0.3) & (yy > 0.7)) |
         ((xx > 0.7) & (yy > 0.7))
     )
+    # 非 Compute 非 HBM = Interposer（材料 2）
     mask = np.where(is_compute, 0, np.where(is_hbm, 1, 2)).astype(np.float64)
     return mask
 

@@ -75,8 +75,9 @@ def z_layer(zz):
 #   HBM 区域：四角矩形
 #   die 间隙（十字线区域）= Interposer 上方，横向记 2
 def horizontal_region(xx, yy):
-    """返回横向区域类型：0=ComputeDie, 1=HBM, 2=Interposer间隙。
+    """返回横向区域类型：0=ComputeDie, 1=HBM, 2=Interposer。
 
+    非 die 区（间隙）归为 Interposer 材料；interface 通道独立标记界面。
     xx, yy : 同形状坐标。
     """
     # Compute Die：中心区
