@@ -193,11 +193,16 @@ if __name__ == '__main__':
     # 注意：必须用 np.load(mmap_mode='r') 而不是 jnp.load！
     #   jnp.load 返回 JAX 数组，np.asarray(fs[idx,:]) 会触发全量 GPU 传输导致 OOM。
     #   np.load(mmap_mode='r') 返回 numpy memmap，索引只读 batch 行，不碰 GPU。
+    # 分辨率相关文件名后缀（nc 决定）：nc=101 用默认，nc=51 用 _51x51
+    _res = args.nc
+    _suf = '' if _res == 101 else f'_{_res}x{_res}'
+    args.branch_dim = _res ** 2  # branch_dim 跟随分辨率
+
     if args.mode == '3d5':
         # 3.5D 模式：功率+掩码+界面 三通道（数据由 gen_mask.py 的 volume 版生成）
-        # 注意：fs_train_3d5_volume.npy 是 gen_mask 生成的 [N, 3*101**2]，已是二维
-        fs_train = np.load('data/fs_train_3d5_volume.npy', mmap_mode='r').reshape(-1, 3*101**2)
-        fs_test = np.load('data/fs_test_3d5_volume.npy', mmap_mode='r').reshape(-1, 3*101**2)
+        # nc=101: fs_train_3d5_volume.npy; nc=51: fs_train_3d5_volume_51x51.npy
+        fs_train = np.load(f'data/fs_train_3d5_volume{_suf}.npy', mmap_mode='r')
+        fs_test = np.load(f'data/fs_test_3d5_volume{_suf}.npy', mmap_mode='r')
         args.channels = 3
         if args.model_name != 'DeepOHeat_v1':
             print(f'[mode=3d5] 仅支持 DeepOHeat_v1，已强制切换（原为 {args.model_name}）')
@@ -208,10 +213,11 @@ if __name__ == '__main__':
         fs_train = np.load('data/fs_train_volume.npy', mmap_mode='r').reshape(-1, 101**2)
         fs_test = np.load('data/fs_test_volume.npy', mmap_mode='r').reshape(-1, 101**2)
         args.channels = 1
-    # 评估真值：baseline 用原版真值；3d5 用自洽真值（gen_truth_3d5.py 生成，若存在）
-    if args.mode == '3d5' and os.path.exists('data/u_test_3d5.npy'):
-        u_test = np.load('data/u_test_3d5.npy')
-        print('[3d5] 使用自洽真值 data/u_test_3d5.npy 评估')
+    # 评估真值：3d5 用自洽真值（gen_truth_3d5.py 生成，若存在），否则用原版
+    u_3d5 = f'data/u_test_3d5{_suf}.npy'
+    if args.mode == '3d5' and os.path.exists(u_3d5):
+        u_test = np.load(u_3d5)
+        print(f'[3d5] 使用自洽真值 {u_3d5} 评估')
     else:
         u_test = np.load('data/u_test_volume.npy')
 
