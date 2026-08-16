@@ -66,14 +66,14 @@ def z_layer(zz):
 
 
 #########################################################################
-# 3. 横向 die 分区（die 层内 GPU / HBM 布局）
+# 3. 横向 die 分区（die 层内 Compute / HBM 布局）
 #########################################################################
-# AI 芯片横向布局（MI300X-inspired benchmark，等 B 组真实布局替换）：
-#   4 个 Compute Die（中心 2×2）+ 4 个 HBM（四角）+ Interposer 上方边缘
-#   x ∈ [0,1], y ∈ [0,1]
-#   Compute 区域：中心 x∈[0.3,0.7], y∈[0.3,0.7]（2×2 四个 die）
-#   HBM 区域：四角矩形
-#   die 间隙（十字线区域）= Interposer 上方，横向记 2
+# AI 芯片横向布局（与 Ansys Icepak 模型 3d5_chip 完全一致）：
+#   中列 2 个 Compute Die + 四角 4 个 HBM + Interposer 间隙
+#   x ∈ [0,1], y ∈ [0,1]（归一化；Icepak 实际 10mm×10mm）
+#   Compute 区域：中列 x∈[0.30,0.70]，y∈[0,0.49] 和 [0.51,1.0]（两块）
+#   HBM 区域：四角（x≤0.29 或 ≥0.71）且（y≤0.29 或 ≥0.71）
+#   die 间隙（x 0.29~0.30 / 0.70~0.71，y 0.49~0.51）= Interposer，横向记 2
 def horizontal_region(xx, yy):
     """返回横向区域类型：0=ComputeDie, 1=HBM, 2=Interposer。
 
@@ -82,14 +82,14 @@ def horizontal_region(xx, yy):
     非 die 区（间隙）归为 Interposer 材料；interface 通道独立标记界面。
     xx, yy : 同形状坐标。
     """
-    # Compute Die：中心区
-    is_compute = (xx >= 0.3) & (xx <= 0.7) & (yy >= 0.3) & (yy <= 0.7)
+    # Compute Die：中列 x∈[0.30,0.70]，y 上下两块
+    is_compute = (xx >= 0.30) & (xx <= 0.70) & ((yy <= 0.49) | (yy >= 0.51))
     # HBM 四角
     is_hbm = (
-        ((xx < 0.3) & (yy < 0.3)) |   # 左下
-        ((xx > 0.7) & (yy < 0.3)) |   # 右下
-        ((xx < 0.3) & (yy > 0.7)) |   # 左上
-        ((xx > 0.7) & (yy > 0.7))     # 右上
+        ((xx <= 0.29) & (yy <= 0.29)) |   # 左下 HBM_1
+        ((xx >= 0.71) & (yy <= 0.29)) |   # 右下 HBM_2
+        ((xx <= 0.29) & (yy >= 0.71)) |   # 左上 HBM_3
+        ((xx >= 0.71) & (yy >= 0.71))     # 右上 HBM_4
     )
     return jnp.where(is_compute, 0, jnp.where(is_hbm, 1, 2)).astype(jnp.int32)
 
