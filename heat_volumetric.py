@@ -1,6 +1,8 @@
 import os
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="false"
 os.environ["CUDA_VISIBLE_DEVICES"]='0'
+# 消融开关：DHV_NO_INTERFACE=1 时禁用 interface_loss（3d5 无界面热流连续对比组）
+DHV_NO_INTERFACE = os.environ.get('DHV_NO_INTERFACE', '0') == '1'
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -87,9 +89,10 @@ def apply_model_deepoheat_st(model, xc, yc, zc, fc, lam_b=1., k_field=None, powe
         # other_surfaces
         bc_other = jnp.mean((uy[:,:,0,:,:])**2) + jnp.mean((uy[:,:,-1,:,:])**2) + jnp.mean((ux[:,0,:,:,:])**2) + jnp.mean((ux[:,-1,:,:,:])**2)
 
-        # 界面热流连续：界面两侧 k·∂u/∂n 相等（3d5 模式启用，baseline 禁用）
-        #   x/y 界面在坐标 0.5，网格索引 = round(0.5*(nc-1))
-        if k_field is not None:
+        # 界面热流连续：界面两侧 k·∂u/∂n 相等
+        #   - 仅 3d5 模式启用
+        #   - 消融时设 DHV_NO_INTERFACE=1 可关闭（对比"无界面热流连续"）
+        if k_field is not None and not DHV_NO_INTERFACE:
             k_iface = int(round(0.5 * (nc - 1)))   # 界面索引（nc 驱动）
             k_left_x  = k_field[:, k_iface-1:k_iface, :, :, :]
             k_right_x = k_field[:, k_iface:k_iface+1, :, :, :]
