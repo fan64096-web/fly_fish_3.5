@@ -18,10 +18,12 @@ k 场由两部分决定：
 
     实际参与训练的 k = 原始 k / K_SCALE
 
-K_SCALE 默认 100。缩放只改变数值大小，不改变各区域 k 的相对比例，
-物理意义（谁导热好、谁差）完全保留。
+K_SCALE 默认 1300，使 die 层硅 k=130 → 0.1，与原版校准均匀 k=0.1 同量级。
+缩放只改变数值大小，不改变各区域 k 的相对比例（130 : 2 : 0.5），
+物理意义（谁导热好、谁差）完全保留。可用环境变量 DHV_K_SCALE 覆盖。
 """
 
+import os
 import jax
 import jax.numpy as jnp
 
@@ -37,8 +39,15 @@ import jax.numpy as jnp
 #   4 = TIM（热界面材料）     k = 2.0
 K_MATERIAL = {0: 130.0, 1: 130.0, 2: 130.0, 3: 0.5, 4: 2.0}
 
-# 参与训练时的缩放系数（见模块顶部说明）
-K_SCALE = 100.0
+# 参与训练时的缩放系数（见模块顶部说明）。
+# 默认 K_SCALE=1300：把 die 层硅（k=130）缩放成 130/1300 = 0.1，
+# 与原版 heat_volumetric 校准好的均匀有效 k=0.1 同量级，
+# 同时保留各层相对比例（130 : 2 : 0.5 —— 硅导热最好、TIM 次之、基板最差）。
+#   硅  130 → 0.1000
+#   TIM   2 → 0.0015
+#   基板 0.5 → 0.0004
+# 可用环境变量 DHV_K_SCALE 覆盖（如 DHV_K_SCALE=100 回到旧的缩放）。
+K_SCALE = float(os.environ.get('DHV_K_SCALE', '1300'))
 
 # 查表用数组：索引 = 材料类型 ID
 K_MATERIAL_ARRAY = jnp.array([K_MATERIAL[i] for i in sorted(K_MATERIAL.keys())], dtype=jnp.float32)
@@ -170,5 +179,12 @@ def build_k_field(xc, yc, zc):
 
     # 缩放（数值稳定）
     k = k / K_SCALE
+
+    # 可选下限（默认关闭）：低 k 层（基板 k=0.0004、TIM=0.0015）乘 k² 后
+    # 在 PDE 残差里几乎无约束。设 DHV_K_FLOOR=0.002 可给它们一个最小约束，
+    # 但会部分抹平 2:0.5 的差异；默认 0 保持真实相对比例 130:2:0.5。
+    k_floor = float(os.environ.get('DHV_K_FLOOR', '0'))
+    if k_floor > 0:
+        k = jnp.maximum(k, k_floor)
 
     return k[None, ..., None]                  # [1, nx, ny, nz, 1]

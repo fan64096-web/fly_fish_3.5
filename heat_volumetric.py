@@ -3,6 +3,8 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="false"
 os.environ["CUDA_VISIBLE_DEVICES"]='0'
 # 消融开关：DHV_NO_INTERFACE=1 时禁用 interface_loss（3d5 无界面热流连续对比组）
 DHV_NO_INTERFACE = os.environ.get('DHV_NO_INTERFACE', '0') == '1'
+# 界面项权重：默认 1.0；调大=界面约束更强，调小=更弱（可用来探索合适强度）
+DHV_IFACE_LAM = float(os.environ.get('DHV_IFACE_LAM', '1.0'))
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -11,7 +13,7 @@ import argparse
 import optax
 from functools import partial
 from models import DeepOHeat_ST, DeepOHeat_v1
-from k_map import build_k_field
+from k_map import build_k_field, K_SCALE
 from hvp import hvp_fwdfwd
 from train import train_loop, update
 from eval import eval_heat3d
@@ -92,18 +94,29 @@ def apply_model_deepoheat_st(model, xc, yc, zc, fc, lam_b=1., k_field=None, powe
         # 界面热流连续：界面两侧 k·∂u/∂n 相等
         #   - 仅 3d5 模式启用
         #   - 消融时设 DHV_NO_INTERFACE=1 可关闭（对比"无界面热流连续"）
+        # 异质界面在 z 向层间（3.5D 纵向结构，与 k_map / make_icepak_dataset 一致）：
+        #   z=0.10  Substrate|Interposer   k: 0.5→130   真实数据热流基本连续 ✅
+        #   z=0.35  Interposer|TIM         k: 130→2     真实数据热流基本连续 ✅
+        #   （z=0.40 TIM|die 不做界面约束：die 是功率注入层+接触热阻，
+        #     真实数据在那里热流明显不连续（Δk·∂u/∂z 为其他界面 3.7 倍），
+        #     强制连续会把 die 层温度"焊死"、使 die 预测误差变差）
+        # 界面两类网格点（下侧 zi-1 / 上侧 zi）的热流连续 → k·uz 相等
+        #   ⚠️ BUG 修复(2026-08-22)：k_field 已被 K_SCALE=1300 缩放(硅130→0.1)，
+        #   直接用缩放 k 算界面项会被压低 K_SCALE²≈169万倍，实测 interface_loss≈4.6e-7
+        #   而 PDE 残差≈6.27，界面项占比≈0.000007%，等于没参与训练（3d5-full ≈ no-interface
+        #   的原因就在这，不是"界面约束有害"）。这里乘回 K_SCALE 用真实物理 k 计算，
+        #   界面热流连续才有真正的约束力。强度由 DHV_IFACE_LAM 控制。
         if k_field is not None and not DHV_NO_INTERFACE:
-            k_iface = int(round(0.5 * (nc - 1)))   # 界面索引（nc 驱动）
-            k_left_x  = k_field[:, k_iface-1:k_iface, :, :, :]
-            k_right_x = k_field[:, k_iface:k_iface+1, :, :, :]
-            ux_left   = ux[:, k_iface-1:k_iface, :, :, :]
-            ux_right  = ux[:, k_iface:k_iface+1, :, :, :]
-            k_down_y  = k_field[:, :, k_iface-1:k_iface, :, :]
-            k_up_y    = k_field[:, :, k_iface:k_iface+1, :, :]
-            uy_down   = uy[:, :, k_iface-1:k_iface, :, :]
-            uy_up     = uy[:, :, k_iface:k_iface+1, :, :]
-            interface_loss = jnp.mean((k_left_x*ux_left - k_right_x*ux_right)**2) + \
-                             jnp.mean((k_down_y*uy_down - k_up_y*uy_up)**2)
+            z_ifaces = (0.10, 0.35)            # 训练坐标系 z 界面位置（mm）
+            interface_loss = 0.0
+            for z_iface in z_ifaces:
+                zi = int(round(z_iface / dz))      # 界面上侧网格索引
+                k_below = k_field[:, :, :, zi-1, :] * K_SCALE   # 下侧真实材料 k
+                k_above = k_field[:, :, :, zi, :]   * K_SCALE   # 上侧真实材料 k
+                uz_below = uz[:, :, :, zi-1, :]
+                uz_above = uz[:, :, :, zi, :]
+                interface_loss += jnp.mean((k_above*uz_above - k_below*uz_below)**2)
+            interface_loss = interface_loss / len(z_ifaces) * DHV_IFACE_LAM   # 平均到每个界面
         else:
             interface_loss = 0.0
 
@@ -295,7 +308,7 @@ if __name__ == '__main__':
         _yc = jnp.linspace(0, 1, nx).reshape(-1, 1)
         _zc = jnp.linspace(0, 0.55, nz).reshape(-1, 1)
         k_field = build_k_field(_xc, _yc, _zc)  # [1, nx, nx, nz, 1]
-        print(f'[3d5] 分区 k 场已构造, 形状 {k_field.shape}')
+        print(f'[3d5] 分区 k 场已构造, 形状 {k_field.shape}, 值域 [{float(k_field.min()):.5f}, {float(k_field.max()):.4f}]')
         loss_fn = lambda model, xc, yc, zc, fc: apply_model_deepoheat_st(model, xc, yc, zc, fc, k_field=k_field, power_dim=args.nc**2, nc=args.nc)
     else:
         # baseline 模式：与原版完全一致

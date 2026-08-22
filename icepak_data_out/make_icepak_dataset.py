@@ -38,6 +38,7 @@ import io
 import sys
 import json
 import glob
+import re
 import argparse
 import numpy as np
 
@@ -70,6 +71,9 @@ DIE_REGIONS = [
 NX, NY, NZ = 101, 101, 56       # 训练网格分辨率
 T_AMB = 20.0                    # 环境温度 °C（eval.py 兼容）
 T_SCALE = 25.0                  # 温度缩放（eval.py 兼容）
+
+# 固定测试集：报告编号（见《功率清单100组.md》，含 3 极端 + 7 常规，勿改）
+TEST_REPORT_NUMS = {16, 19, 22, 25, 26, 27, 59, 80, 86, 93}
 
 
 def z_icepak_to_train(z_mm):
@@ -268,10 +272,21 @@ def main():
         print(f'节点{xyz_m.shape[0]}  T[{T_grid.min():.2f},{T_grid.max():.2f}]°C  '
               f'功率峰值{pmap.max():.3f}')
 
-    # 数据集划分：默认 80% 训练 / 20% 测试
-    ntr = int(round(n * 0.8))
-    i_tr, i_te = range(ntr), range(ntr, n)
-    print(f'\n[拆分] 训练 {len(i_tr)} 个 / 测试 {len(i_te)} 个')
+    # 数据集划分：按报告编号固定测试集（TEST_REPORT_NUMS，见《功率清单100组.md》）。
+    # 不再使用"前80%/后20%"——那样会把极端热点样本按顺序排进测试集，导致对比不公平。
+    def report_num(s):
+        base = os.path.basename(s['report'])
+        m = re.search(r'(\d+)', base)
+        return int(m.group(1)) if m else -1
+
+    i_te = [i for i, s in enumerate(samples) if report_num(s) in TEST_REPORT_NUMS]
+    i_tr = [i for i in range(n) if i not in set(i_te)]
+    if not i_te:
+        print('[拆分] 警告: 测试集为空！样本清单中未找到任何固定测试报告编号')
+        print('       请确认清单文件名形如 report.16 / report.100 等')
+        sys.exit(1)
+    print(f'\n[拆分] 训练 {len(i_tr)} 个 / 测试 {len(i_te)} 个 (固定测试集)')
+    print(f'[拆分] 测试集: ' + ' '.join(os.path.basename(samples[i]['report']) for i in i_te))
 
     def save(name, arr):
         np.save(os.path.join(args.out_dir, name), arr)
