@@ -42,17 +42,21 @@ DATA_DIR="$CODE_DIR/data"
 echo "[deploy] 代码目录: $CODE_DIR"
 echo "[deploy] 数据目录: $DATA_DIR"
 
-# ---- 2. 检查报告是否齐全 ----
-echo "[deploy] 检查报告..."
+# ---- 2. 检查报告是否齐全（report.01 ~ report.100）----
+echo "[deploy] 检查报告 (01~100)..."
 missing=0
-for i in 01 02 03 04 05 06 07 08 09 10; do
+cnt=0
+for i in $(seq -w 1 99); do
     [ -f "$REPORTS_DIR/report.$i" ] || { echo "  缺 report.$i"; missing=1; }
+    cnt=$((cnt+1))
 done
+[ -f "$REPORTS_DIR/report.100" ] || { echo "  缺 report.100"; missing=1; }
+cnt=$((cnt+1))
 if [ "$missing" = "1" ]; then
-    echo "[deploy] 10 个报告不齐全，请放到 $REPORTS_DIR"
+    echo "[deploy] 100 个报告不齐全（应有 $cnt 个），请放到 $REPORTS_DIR"
     exit 1
 fi
-echo "[deploy] 10 个报告齐全。"
+echo "[deploy] $cnt 个报告齐全。"
 
 # ---- 3. 复制转换脚本到代码目录（保证能 import gen_mask 等）----
 cp "$SCRIPT_DIR/make_icepak_dataset.py" "$CODE_DIR/" || { echo "复制脚本失败"; exit 1; }
@@ -103,7 +107,7 @@ echo "[deploy] 原始数据已备份: $BACKUP_DIR"
 
 # ---- 6. 生成 Icepak 真实数据集（在代码目录运行，确保 import 正常）----
 cd "$CODE_DIR"
-echo "[deploy] 生成数据集 (10 样本 -> 8 训练 + 2 测试, 101x101x56)..."
+echo "[deploy] 生成数据集 (100 样本 -> 90 训练 + 10 测试, 101x101x56)..."
 python3 "$CODE_DIR/make_icepak_dataset.py" "$SAMPLES_SRV" --out_dir "$DATA_DIR" || { echo "数据生成失败"; exit 1; }
 
 # ---- 7. 训练三组 ----
