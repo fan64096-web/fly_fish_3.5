@@ -113,7 +113,15 @@ python3 "$CODE_DIR/make_icepak_dataset.py" "$SAMPLES_SRV" --out_dir "$DATA_DIR" 
 # ---- 7. 训练三组 ----
 EPOCHS="${EPOCHS:-3000}"
 LOG_EVERY="${LOG_EVERY:-200}"
-BATCH=8
+BATCH="${BATCH:-8}"
+NC="${NC:-101}"
+
+# 清理本次要用的结果目录，防止旧结果（尤其 3d5 全/无界面 曾共用目录）污染本次归档。
+rm -rf "$CODE_DIR/results/results_volume/DeepOHeat_v1"/nf${BATCH}_nc${NC}_*_mode_*
+rm -rf "$CODE_DIR/results/results_volume/DeepOHeat_v1"/tag_baseline_mode \
+       "$CODE_DIR/results/results_volume/DeepOHeat_v1"/tag_mode_3d5_full \
+       "$CODE_DIR/results/results_volume/DeepOHeat_v1"/tag_mode_3d5_no_interface
+echo "[deploy] 已清理旧结果目录"
 
 run_one() { # mode tag extra_env
     local mode="$1" tag="$2" envs="${3:-}"
@@ -125,7 +133,18 @@ run_one() { # mode tag extra_env
     mkdir -p "$RESULT"
     env $envs python3 heat_volumetric.py --mode "$mode" --model_name DeepOHeat_v1 \
          --batch "$BATCH" --epochs "$EPOCHS" --log_epoch "$LOG_EVERY" \
-         2>&1 | tee "$RESULT/train_console.log" | tail -40
+         2>&1 | tee "$RESULT/train_console.log" | tail -60
+    # 归档真实结果：heat_volumetric 把 csv/npy/eqx 写到 nf<batch>_nc<NC>_..._mode_<mode> 目录。
+    # 3d5 完整版与 3d5 无界面版 mode 相同、会写进同一目录互相覆盖，
+    # 因此每组训练完立即把真实结果复制进自己的 tag_* 目录。
+    real_dir="$CODE_DIR/results/results_volume/DeepOHeat_v1/nf${BATCH}_nc${NC}_*_mode_${mode}"
+    for d in $real_dir; do
+        if [ -d "$d" ]; then
+            cp -u "$d"/* "$RESULT"/ 2>/dev/null || true
+            echo "[deploy] 结果归档: $(basename "$d") -> $RESULT"
+            break
+        fi
+    done
     echo "[deploy] $tag 完成: $RESULT"
 }
 
