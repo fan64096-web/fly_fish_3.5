@@ -277,13 +277,13 @@ if __name__ == '__main__':
         fs_train = np.load('data/fs_train_volume.npy', mmap_mode='r').reshape(-1, 101**2)
         fs_test = np.load('data/fs_test_volume.npy', mmap_mode='r').reshape(-1, 101**2)
         args.channels = 1
-    # 评估真值：3d5 用自洽真值（gen_truth_3d5.py 生成，若存在），否则用原版
-    u_3d5 = f'data/u_test_3d5{_suf}.npy'
-    if args.mode == '3d5' and os.path.exists(u_3d5):
-        u_test = np.load(u_3d5)
-        print(f'[3d5] 使用自洽真值 {u_3d5} 评估')
-    else:
-        u_test = np.load('data/u_test_volume.npy')
+    # 评估真值：统一用 Icepak 真实温度场（baseline 与 3d5 一致，保证公平对比）
+    #   注意：旧逻辑曾让 3d5 优先用"自洽真值" data/u_test_3d5.npy（gen_truth_3d5.py 生成，
+    #   即 3d5 分区 k 假设下 PDE 的解，给 3d5 一个"自己假设下的标准答案"）。但自洽真值
+    #   是"模型应学到的物理"，不是"Icepak 真实温度"；用它评估会与 baseline（用 Icepak
+    #   真值）不可比。Icepak 真实数据具备后，统一用它评估，删除自洽真值分支（2026-08-25）。
+    u_test = np.load('data/u_test_volume.npy')
+    print(f'评估真值: data/u_test_volume.npy (Icepak 真实温度场, 形状 {u_test.shape})')
 
     # result dir
     root_dir = os.path.join(os.getcwd(), 'results', 'results_volume', args.model_name)
