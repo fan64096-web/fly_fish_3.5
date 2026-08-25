@@ -5,6 +5,18 @@ os.environ["CUDA_VISIBLE_DEVICES"]='0'
 DHV_NO_INTERFACE = os.environ.get('DHV_NO_INTERFACE', '0') == '1'
 # 界面项权重：默认 1.0；调大=界面约束更强，调小=更弱（可用来探索合适强度）
 DHV_IFACE_LAM = float(os.environ.get('DHV_IFACE_LAM', '1.0'))
+# 3d5 模式 BC：纯物理设定（Icepak 建模参数推导，不碰训练数据）
+#   Icepak 边界条件（Icepak建模交接-2026-08-16.md）：
+#     Substrate 底面 & die 表面: HTC=500 W/(m²·K), 环境 25°C；侧面弱对流
+#   物理 Robin: u ± α·uz = u_amb,  α = k/(HTC·Lz)
+#     Lz = 1.8mm/0.55 = 3.273e-3 m(每训练z单位)
+#     top (die顶面, k_die=130):   α_top = 130/(500·3.273e-3) = 79.44, u_amb=0.2
+#     bottom (Substrate底面, k_sub=0.5): α_bot = 0.5/(500·3.273e-3) = 0.3056, u_amb=0.2
+#   注意: 参考温度 u_amb=0.2 与 baseline 原版相同(都是25°C)；真正错的是系数。
+DHV_BC_TOP_REF   = float(os.environ.get('DHV_BC_TOP_REF', '0.2'))
+DHV_BC_TOP_KH    = float(os.environ.get('DHV_BC_TOP_KH', '79.444'))
+DHV_BC_BOT_REF   = float(os.environ.get('DHV_BC_BOT_REF', '0.2'))
+DHV_BC_BOT_KH    = float(os.environ.get('DHV_BC_BOT_KH', '0.3056'))
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -46,7 +58,10 @@ def apply_model_deepoheat_st(model, xc, yc, zc, fc, lam_b=1., k_field=None, powe
         # 网格参数（nc 驱动，支持任意分辨率）
         nz = int(0.55 * nc + 0.45)           # z 层数
         dz = 0.55 / (nz - 1)                 # z 步长
-        # 功率注入的 z 索引（物理 z 固定：0.10 / 0.11~0.14 / 0.15）
+        # 功率注入的 z 索引（baseline 原版位置，勿改：z=0.10 / 0.11~0.14 / 0.15）
+        #   注意：此位置是论文原版对"合成数据"的设定（热源在中介层带）。
+        #   真实 Icepak 数据的热源在 die 层（训练坐标 z=0.40~0.55）。
+        #   3d5 分支已改为真实 die 层注入；baseline 为对照基准保持原版不变。
         k_bot_inj = int(round(0.10 / dz))    # z=0.10
         k_top_inj = int(round(0.15 / dz))    # z=0.15
 
@@ -65,14 +80,38 @@ def apply_model_deepoheat_st(model, xc, yc, zc, fc, lam_b=1., k_field=None, powe
         # baseline 模式：power_dim=None，f 即纯功率，行为与原版一致
         f_power = f[..., :power_dim] if power_dim is not None else f
 
+        # 低 k 层残差归一化开关：DHV_K_NORMALIZE=1(默认) 时，3d5 无源区残差除以 k。
+        #   稳态无源热传导 k∇²u=0 (k≠0) ⇔ ∇²u=0, 数学等价, 不损失物理。
+        #   作用: 修复"低 k 层梯度消失" —— TIM(k=0.0015)/基板(k=0.0004) 乘 k 后
+        #   残差被压小 3~6 个量级，训练完全看不见这些层；除 k 后各层 ∇² 等权。
+        #   （实测 TIM 层 |∇²u|≈19 全场最大却贡献≈0.001, 正因被 k 吞掉。）
+        #   有源 die 层(k=0.1)不产生梯度消失, 维持 k∇²u+q 物理形式。
+        DHV_K_NORM = os.environ.get('DHV_K_NORMALIZE', '1') == '1'
         if k_field is not None:
-            # 3d5 模式：各 z 段乘对应分区 k 场（k_field 形状 [1, nx, ny, nz, 1]）
-            top_pow  = k_field[:,:,:,k_top_inj:k_top_inj+1,:] * laplacian_top_power + f_power.reshape(-1, nc, nc, 1, 1)
-            int_pow  = k_field[:,:,:,k_bot_inj+1:k_top_inj,:] * laplacian_interior_power + 2*f_power.reshape(-1, nc, nc, 1, 1)
-            bot_pow  = k_field[:,:,:,k_bot_inj:k_bot_inj+1,:] * laplacian_bottom_power + f_power.reshape(-1, nc, nc, 1, 1)
-            pde_res  = jnp.concatenate([k_field[:,:,:,k_top_inj+1:,:]*laplacian[:,:,:,k_top_inj+1:,:],
-                                        top_pow, int_pow, bot_pow,
-                                        k_field[:,:,:,0:k_bot_inj,:]*laplacian[:,:,:,0:k_bot_inj,:]], axis=3)
+            # ============ 3d5 模式：功率注入真实 die 层 ============
+            # 训练坐标 z 的物理层映射（与 make_icepak_dataset.py / k_map.py 一致）：
+            #   z<0.10 Substrate / 0.10~0.35 Interposer / 0.35~0.40 TIM / 0.40~0.55 die
+            # 真实热源在 die（封装顶层），原代码注入 z=0.10~0.15（Interposer）是错位，
+            # 改为注入 z=0.40~0.55（die 层）。baseline 分支保持原版位置不动。
+            k_die_bot = int(round(0.40 / dz))     # z=0.40 die 底
+            k_die_top = int(round(0.55 / dz))     # z=0.55 die 顶（=上层边界）
+            # die 下方（z<0.40：Substrate/Interposer/TIM）无功率：
+            #   开启归一化 => 只用 ∇²u（无源区 k∇²u=0 ⇔ ∇²u=0）; 关闭 => k_field·∇²u
+            if DHV_K_NORM:
+                below = laplacian[:,:,:,0:k_die_bot,:]
+            else:
+                below = k_field[:,:,:,0:k_die_bot,:] * laplacian[:,:,:,0:k_die_bot,:]
+            # die 底 1 层（z=0.40）×1 功率
+            bot_pow = k_field[:,:,:,k_die_bot:k_die_bot+1,:] * laplacian[:,:,:,k_die_bot:k_die_bot+1,:] \
+                      + f_power.reshape(-1, nc, nc, 1, 1)
+            # die 中部（z=0.41~0.54）×2 功率
+            int_pow = k_field[:,:,:,k_die_bot+1:k_die_top,:] * laplacian[:,:,:,k_die_bot+1:k_die_top,:] \
+                      + 2 * f_power.reshape(-1, nc, nc, 1, 1)
+            # die 顶 1 层（z=0.55）×1 功率
+            top_pow = k_field[:,:,:,k_die_top:k_die_top+1,:] * laplacian[:,:,:,k_die_top:k_die_top+1,:] \
+                      + f_power.reshape(-1, nc, nc, 1, 1)
+            # 拼接（z 从大到小，与 baseline 分支组织方式一致）
+            pde_res = jnp.concatenate([top_pow, int_pow, bot_pow, below], axis=3)
         else:
             # baseline 模式：原版分段（各 z 段固定 k）
             pde_res = jnp.concatenate([0.1*laplacian[:,:,:,k_top_inj+1:,:],
@@ -84,11 +123,20 @@ def apply_model_deepoheat_st(model, xc, yc, zc, fc, lam_b=1., k_field=None, powe
         pde_res = jnp.mean(pde_res**2)
 
 
-        # top surface
-        bc_top = jnp.mean((u[:,:,:,-1,:] - 0.2 + 2*uz[:,:,:,-1,:])**2)
-        # bottom surface
-        bc_bottom = jnp.mean((u[:,:,:,0,:] - 0.2 - 40*uz[:,:,:,0,:])**2)
-        # other_surfaces
+        # top surface (Robin: u ± α·uz = u_amb，符号按外法向)
+        #   baseline: 论文原版(0.2/系数2)不动
+        #   3d5: 纯物理设定（Icepak HTC=500/环境25°C 推导, 不碰训练数据）
+        #     top    (die顶面, k=130):    u + 79.44·uz = 0.2
+        #     bottom (Substrate底面,k=0.5): u − 0.306·uz = 0.2
+        #   原版系数 top=2/bottom=40 与物理推导方向相反、量级差几十倍
+        #   （原版 top 系数过小→顶面几乎不约束; bottom 40 过大→残差≈1.5e4 巨大）
+        if k_field is not None:
+            bc_top = jnp.mean((u[:,:,:,-1,:] - DHV_BC_TOP_REF + DHV_BC_TOP_KH*uz[:,:,:,-1,:])**2)
+            bc_bottom = jnp.mean((u[:,:,:,0,:] - DHV_BC_BOT_REF - DHV_BC_BOT_KH*uz[:,:,:,0,:])**2)
+        else:
+            bc_top = jnp.mean((u[:,:,:,-1,:] - 0.2 + 2*uz[:,:,:,-1,:])**2)
+            bc_bottom = jnp.mean((u[:,:,:,0,:] - 0.2 - 40*uz[:,:,:,0,:])**2)
+        # other_surfaces（x/y 侧面，真实数据近似绝热 —— baseline 与 3d5 均相同）
         bc_other = jnp.mean((uy[:,:,0,:,:])**2) + jnp.mean((uy[:,:,-1,:,:])**2) + jnp.mean((ux[:,0,:,:,:])**2) + jnp.mean((ux[:,-1,:,:,:])**2)
 
         # 界面热流连续：界面两侧 k·∂u/∂n 相等
