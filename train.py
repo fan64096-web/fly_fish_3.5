@@ -72,11 +72,13 @@ def train_loop_valsel(model, optimizer, opt_state, update_fn, train_generator,
     best_epoch = -1
 
     def snapshot(m):
-        # 只复制数组叶子（可训练参数），非数组叶子不碰
-        return jax.tree_util.tree_map(lambda x: x, eqx.filter(m, eqx.is_array))
+        # 完整模型深拷贝(数组叶子复制, 静态叶子共享)——结束时直接返回最优时刻的
+        # 整个模型。不用 tree_at 做结构级替换: equinox 要求 where 回调只依赖
+        # PyTree 结构、不得依赖叶子值, 传入 tree_leaves(...) 的写法在运行时会
+        # 触发 ValueError(`where` must use just the PyTree structure)。
+        return jax.tree_util.tree_map(lambda x: x, m)
 
-    best_params = snapshot(model)
-    leaves_treedef = None
+    best_model = snapshot(model)
 
     start = None
     for epoch in range(num_epochs):
@@ -102,15 +104,14 @@ def train_loop_valsel(model, optimizer, opt_state, update_fn, train_generator,
             if val_mape < best_mape:
                 best_mape = val_mape
                 best_epoch = epoch + 1
-                best_params = snapshot(model)
+                best_model = snapshot(model)
                 mark = '  <-- best'
             print(f"  [VAL @{epoch+1}] val_mape={val_mape:.6f}{mark}")
 
     runtime = time.time() - start if start is not None else 0.0
 
-    # 用最优权重回填 model（保持 pytree 结构，只换数组叶子）
+    # 直接返回最优时刻的完整模型快照
     if val_eval_fn is not None and best_epoch > 0:
-        model = eqx.tree_at(lambda m: tuple(jax.tree_util.tree_leaves(eqx.filter(m, eqx.is_array))),
-                            model, tuple(jax.tree_util.tree_leaves(best_params)))
+        model = best_model
 
     return model, optimizer, opt_state, runtime, best_epoch, best_mape
