@@ -110,78 +110,115 @@ cd "$CODE_DIR"
 echo "[deploy] 生成数据集 (100 样本 -> 90 训练 + 10 测试, 101x101x56)..."
 python3 "$CODE_DIR/make_icepak_dataset.py" "$SAMPLES_SRV" --out_dir "$DATA_DIR" || { echo "数据生成失败"; exit 1; }
 
-# ---- 7. 训练三组 ----
+# ---- 7. 训练三组 × 多 seed（固定协议）----
 EPOCHS="${EPOCHS:-3000}"
 LOG_EVERY="${LOG_EVERY:-200}"
 BATCH="${BATCH:-8}"
 NC="${NC:-101}"
+# 固定协议多种子：空格分隔的 seed 列表，每组模型各跑一遍，最后报 mean±std。
+#   固定协议 = 各组同轮数/同batch/同验证集划分规则(同seed同划分)/同评估频率，
+#   唯一自由变量是物理假设；种子重复实验量化"彩票效应"。
+SEEDS="${SEEDS:-42 2026 7}"
+DHV_EVAL_EVERY="${DHV_EVAL_EVERY:-500}"
 
-# 清理本次要用的结果目录，防止旧结果（尤其 3d5 全/无界面 曾共用目录）污染本次归档。
+echo "[deploy] 固定协议: epochs=$EPOCHS batch=$BATCH seeds=($SEEDS) eval_every=$DHV_EVAL_EVERY"
+
+# 清理本次要用的结果目录（含旧的无 seed 目录与旧 tag 目录），防止污染。
 rm -rf "$CODE_DIR/results/results_volume/DeepOHeat_v1"/nf${BATCH}_nc${NC}_*_mode_*
-rm -rf "$CODE_DIR/results/results_volume/DeepOHeat_v1"/tag_baseline_mode \
-       "$CODE_DIR/results/results_volume/DeepOHeat_v1"/tag_mode_3d5_full \
-       "$CODE_DIR/results/results_volume/DeepOHeat_v1"/tag_mode_3d5_no_interface
+rm -rf "$CODE_DIR/results/results_volume/DeepOHeat_v1"/tag_seed*_baseline_mode \
+       "$CODE_DIR/results/results_volume/DeepOHeat_v1"/tag_seed*_mode_3d5_full \
+       "$CODE_DIR/results/results_volume/DeepOHeat_v1"/tag_seed*_mode_3d5_no_interface
 echo "[deploy] 已清理旧结果目录"
 
-run_one() { # mode tag extra_env
-    local mode="$1" tag="$2" envs="${3:-}"
+run_one() { # mode tag seed extra_env
+    local mode="$1" tag="$2" seed="$3" envs="${4:-}"
     echo ""
     echo "======================================================"
-    echo "[deploy] 训练: $tag (mode=$mode, epochs=$EPOCHS)"
+    echo "[deploy] 训练: $tag (mode=$mode, epochs=$EPOCHS, seed=$seed)"
     echo "======================================================"
-    RESULT="$CODE_DIR/results/results_volume/DeepOHeat_v1/tag_$tag"
+    RESULT="$CODE_DIR/results/results_volume/DeepOHeat_v1/tag_seed${seed}_${tag}"
     mkdir -p "$RESULT"
-    env $envs python3 heat_volumetric.py --mode "$mode" --model_name DeepOHeat_v1 \
-         --batch "$BATCH" --epochs "$EPOCHS" --log_epoch "$LOG_EVERY" \
+    env $envs DHV_EVAL_EVERY="$DHV_EVAL_EVERY" python3 heat_volumetric.py --mode "$mode" --model_name DeepOHeat_v1 \
+         --batch "$BATCH" --epochs "$EPOCHS" --log_epoch "$LOG_EVERY" --seed "$seed" \
          2>&1 | tee "$RESULT/train_console.log" | tail -60
-    # 归档真实结果：heat_volumetric 把 csv/npy/eqx 写到 nf<batch>_nc<NC>_..._mode_<mode> 目录。
-    # 3d5 完整版与 3d5 无界面版 mode 相同、会写进同一目录互相覆盖，
-    # 因此每组训练完立即把真实结果复制进自己的 tag_* 目录。
-    real_dir="$CODE_DIR/results/results_volume/DeepOHeat_v1/nf${BATCH}_nc${NC}_*_mode_${mode}"
-    for d in $real_dir; do
-        if [ -d "$d" ]; then
-            cp -u "$d"/* "$RESULT"/ 2>/dev/null || true
-            echo "[deploy] 结果归档: $(basename "$d") -> $RESULT"
-            break
-        fi
-    done
-    echo "[deploy] $tag 完成: $RESULT"
+    # 归档: 结果目录现在带 _valsel_seed<seed> 后缀, 精确定位本组目录
+    real_dir=$(ls -d "$CODE_DIR/results/results_volume/DeepOHeat_v1"/nf${BATCH}_nc${NC}_*_mode_${mode}_valsel_seed${seed} 2>/dev/null | head -1)
+    if [ -n "$real_dir" ] && [ -d "$real_dir" ]; then
+        cp -u "$real_dir"/* "$RESULT"/ 2>/dev/null || true
+        echo "[deploy] 结果归档: $(basename "$real_dir") -> $RESULT"
+    else
+        echo "[deploy] ⚠️ 未找到预期结果目录 nf*_mode_${mode}_valsel_seed${seed}"
+    fi
+    echo "[deploy] $tag(seed=$seed) 完成: $RESULT"
 }
 
-run_one baseline baseline_mode        ""
-run_one 3d5      mode_3d5_full        ""
-run_one 3d5      mode_3d5_no_interface "DHV_NO_INTERFACE=1"
+for seed in $SEEDS; do
+    run_one baseline baseline_mode         "$seed" ""
+    run_one 3d5      mode_3d5_full         "$seed" ""
+    run_one 3d5      mode_3d5_no_interface "$seed" "DHV_NO_INTERFACE=1"
+done
 
-# ---- 8. 汇总对比 ----
+# ---- 8. 汇总对比（多 seed: mean±std）----
 echo ""
 echo "======================================================"
-echo "[deploy] 三组对比摘要：loss 末段 / rel_l2 / MAPE"
+echo "[deploy] 固定协议对比摘要 (seeds: $SEEDS)"
 echo "======================================================"
-python3 - "$CODE_DIR" <<'PYEOF'
-import os, sys
-code_dir = sys.argv[1]
+python3 - "$CODE_DIR" "$SEEDS" <<'PYEOF'
+import os, sys, re
+import statistics
+code_dir, seeds = sys.argv[1], sys.argv[2].split()
 base = os.path.join(code_dir, "results", "results_volume", "DeepOHeat_v1")
-def summary(tag, label):
-    d = os.path.join(base, f"tag_{tag}")
-    loss_f = os.path.join(d, "log (loss).csv")
-    ev_f = os.path.join(d, "log (eval metrics).csv")
-    print(f"\n--- {label} ---")
-    if os.path.exists(loss_f):
-        rows = [l.strip() for l in open(loss_f) if l.strip()]
-        print("  loss 末3:", rows[-3:] if rows else "空")
-    if os.path.exists(ev_f):
-        kv = {}
-        for l in open(ev_f):
-            if ':' in l:
-                k, v = l.strip().split(':', 1)
-                kv[k.strip()] = v.strip()
-        print("  rel_l2_mean:", kv.get('rel_l2_mean', 'N/A'),
-              "| mape_mean:", kv.get('mape_mean', 'N/A'),
-              "| pape_mean:", kv.get('pape_mean', 'N/A'))
-summary("baseline_mode", "baseline(原版)")
-summary("mode_3d5_full", "3d5(分区k+界面)")
-summary("mode_3d5_no_interface", "3d5-无界面(消融)")
+def metrics_for(tag, s):
+    ev_f = os.path.join(base, f"tag_seed{s}_{tag}", "log (eval metrics).csv")
+    if not os.path.exists(ev_f):
+        return None
+    kv = {}
+    for l in open(ev_f):
+        if ':' in l:
+            k, v = l.strip().split(':', 1)
+            kv[k.strip()] = v.strip()
+    return kv
+def best_val(tag, s):
+    vf = os.path.join(base, f"tag_seed{s}_{tag}", "log (val mape).csv")
+    if not os.path.exists(vf):
+        return None
+    rows = [l.strip() for l in open(vf) if l.strip()]
+    if not rows:
+        return None
+    vals = [float(r.split(',')[1]) for r in rows]
+    return min(vals)
+groups = [("baseline_mode", "baseline(原版)"),
+          ("mode_3d5_full", "3d5(分区k+界面)"),
+          ("mode_3d5_no_interface", "3d5-无界面(消融)")]
+table = {}
+for tag, label in groups:
+    rel2s, mapes, vmapes = [], [], []
+    for s in seeds:
+        kv = metrics_for(tag, s)
+        if kv:
+            rel2s.append(float(kv['rel_l2_mean']))
+            mapes.append(float(kv['mape_mean']))
+        bv = best_val(tag, s)
+        if bv is not None:
+            vmapes.append(bv)
+    table[label] = (rel2s, mapes, vmapes)
+def fmt(xs, scale=1.0, pct=False):
+    if not xs:
+        return "N/A"
+    m = statistics.mean(xs)*scale
+    sd = statistics.stdev(xs)*scale if len(xs) > 1 else 0.0
+    return f"{m:.4f}±{sd:.4f}" + ("%" if pct else "")
+for label, (rel2s, mapes, vmapes) in table.items():
+    tag_of = {l: t for t, l in groups}[label]
+    print(f"\n--- {label} (n={len(mapes)} seeds) ---")
+    for s in seeds:
+        kv = metrics_for(tag_of, s)
+        if kv:
+            print(f"  seed {s}: rel_l2={float(kv['rel_l2_mean']):.4f}  mape={float(kv['mape_mean'])*100:.2f}%")
+    print(f"  测试 rel_l2  mean±std: {fmt(rel2s)}")
+    print(f"  测试 MAPE    mean±std: {fmt(mapes, 100, True)}")
+    print(f"  验证最优MAPE mean±std: {fmt(vmapes, 100, True)}  (早停选优依据)")
 PYEOF
 
 echo ""
-echo "[deploy] 全部完成。详细结果: $CODE_DIR/results/results_volume/DeepOHeat_v1/tag_*/"
+echo "[deploy] 全部完成。详细结果: $CODE_DIR/results/results_volume/DeepOHeat_v1/tag_seed*/"

@@ -17,6 +17,23 @@ DHV_BC_TOP_REF   = float(os.environ.get('DHV_BC_TOP_REF', '0.2'))
 DHV_BC_TOP_KH    = float(os.environ.get('DHV_BC_TOP_KH', '79.444'))
 DHV_BC_BOT_REF   = float(os.environ.get('DHV_BC_BOT_REF', '0.2'))
 DHV_BC_BOT_KH    = float(os.environ.get('DHV_BC_BOT_KH', '0.3056'))
+# ---------------------------------------------------------------------------
+# 功率幅值归一化修正（2026-08-28，借鉴朋友 FD 诊断，标定只用训练集）
+# ---------------------------------------------------------------------------
+# 背景（朋友 fd_verify.py 发现，我们复核确认）：make_icepak_dataset.py 把功率
+#   峰值统一缩放到 5，这是"与原论文数据同量级"的工程约定，与 u=(T-20)/25、
+#   k/1300 两个归一化在 PDE 里不自洽 → 训练 PDE 的功率项比真实物理强约 3.6 倍
+#   （FD 温升 59.9°C vs 真值 16.8°C）。
+# 系数怎么定（干净流程，不碰测试集）：
+#   1) FD 方程是线性的 → 温升 ∝ 功率系数，s* = 1/温升倍率 是精确关系；
+#   2) 用 fd_verify_clean.py --scan 在【训练集】样本上扫描倍率，取倍率≈1 的 s；
+#   3) export DHV_POWER_SCALE=<该值> 再训练；论文如实写"功率归一化系数由
+#      训练集 FD 标定，测试集仅在最终评估使用一次"。
+#   注意：朋友原版 0.2809 是在测试集上得出的（先看答案再考试），不采用其数值，
+#   仅作量级参考（训练/测试同分布，训练集标定值预计接近）。纯单位推导给不出
+#   唯一系数（x/z 坐标缩放不一致 + 依赖几何/边界），故不做伪"理论值"。
+# 默认 1.0 = 关闭修正（回到旧行为）；baseline 分支不受此变量影响，保持原版。
+DHV_POWER_SCALE = float(os.environ.get('DHV_POWER_SCALE', '1.0'))
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -27,7 +44,7 @@ from functools import partial
 from models import DeepOHeat_ST, DeepOHeat_v1
 from k_map import build_k_field, K_SCALE
 from hvp import hvp_fwdfwd
-from train import train_loop, update
+from train import train_loop, train_loop_valsel, update
 from eval import eval_heat3d
 
 @jax.jit
@@ -78,7 +95,12 @@ def apply_model_deepoheat_st(model, xc, yc, zc, fc, lam_b=1., k_field=None, powe
 
         # 3.5D 模式：f 是三通道拼接 [功率|掩码|界面]，功率注入只用功率段
         # baseline 模式：power_dim=None，f 即纯功率，行为与原版一致
+        # 3d5 功率幅值修正：乘 DHV_POWER_SCALE（训练集 FD 标定，见文件头部注释；
+        #   修复"功率峰值=5 的工程归一化与 k/T 归一化不自洽、功率项偏强 ~3.6 倍"。
+        #   baseline 保持论文原版不动。默认 1.0=不修正。）
         f_power = f[..., :power_dim] if power_dim is not None else f
+        if power_dim is not None:
+            f_power = f_power * DHV_POWER_SCALE
 
         # 低 k 层残差归一化开关：DHV_K_NORMALIZE=1(默认) 时，3d5 无源区残差除以 k。
         #   稳态无源热传导 k∇²u=0 (k≠0) ⇔ ∇²u=0, 数学等价, 不损失物理。
@@ -148,13 +170,22 @@ def apply_model_deepoheat_st(model, xc, yc, zc, fc, lam_b=1., k_field=None, powe
         #   （z=0.40 TIM|die 不做界面约束：die 是功率注入层+接触热阻，
         #     真实数据在那里热流明显不连续（Δk·∂u/∂z 为其他界面 3.7 倍），
         #     强制连续会把 die 层温度"焊死"、使 die 预测误差变差）
-        # 界面两类网格点（下侧 zi-1 / 上侧 zi）的热流连续 → k·uz 相等
-        #   ⚠️ BUG 修复(2026-08-22)：k_field 已被 K_SCALE=1300 缩放(硅130→0.1)，
-        #   直接用缩放 k 算界面项会被压低 K_SCALE²≈169万倍，实测 interface_loss≈4.6e-7
-        #   而 PDE 残差≈6.27，界面项占比≈0.000007%，等于没参与训练（3d5-full ≈ no-interface
-        #   的原因就在这，不是"界面约束有害"）。这里乘回 K_SCALE 用真实物理 k 计算，
-        #   界面热流连续才有真正的约束力。强度由 DHV_IFACE_LAM 控制。
+        #
+        # ⚠️ v2 重构（2026-08-28，修复"有界面反而更差"）：
+        #   旧版三次实验有界面均差于无界面（3.45vs2.33 / 6.66vs3.51 / 3000轮 6.51vs6.50）。
+        #   诊断（交接文档第十一节）：①量级失衡——界面项以真实 k(130,2) 计算，
+        #   数值远大于 PDE 残差，主导训练；②单点强制突变——在 1 个网格点要求
+        #   k·∂u/∂z 相等而 k 跳变 260 倍，光滑网络表示不了导数突变，只能"磨平"
+        #   界面附近温度场硬凑，扭曲整场；③绝对差惩罚——误差集中在 k 大的硅侧。
+        #   v2 改法：
+        #   (a) 相对误差归一化：loss = mean(((k↑uz↑ − k↓uz↓)/(k↑+k↓))²)，
+        #       无量纲，两侧贡献自动均衡 —— 修复①③；
+        #   (b) 过渡带平均：界面两侧各取 IFACE_BAND(默认3) 个网格点求平均热流
+        #       再比较 —— 网络只需光滑过渡，不需单点突变 —— 修复②。
+        #       物理依据：真实界面是微米级过渡层，不是数学突变面。
+        #   DHV_IFACE_V2=0 可切回旧版实现（严格消融用）。
         if k_field is not None and not DHV_NO_INTERFACE:
+            DHV_IFACE_V2 = os.environ.get('DHV_IFACE_V2', '1') == '1'
             z_ifaces = (0.10, 0.35)            # 训练坐标系 z 界面位置（mm）
             interface_loss = 0.0
             for z_iface in z_ifaces:
@@ -163,7 +194,24 @@ def apply_model_deepoheat_st(model, xc, yc, zc, fc, lam_b=1., k_field=None, powe
                 k_above = k_field[:, :, :, zi, :]   * K_SCALE   # 上侧真实材料 k
                 uz_below = uz[:, :, :, zi-1, :]
                 uz_above = uz[:, :, :, zi, :]
-                interface_loss += jnp.mean((k_above*uz_above - k_below*uz_below)**2)
+                if DHV_IFACE_V2:
+                    # (a) 相对误差（无量纲，消除 k 量级失衡）
+                    flux_up = k_above * uz_above
+                    flux_dn = k_below * uz_below
+                    rel = (flux_up - flux_dn) / (jnp.abs(flux_up) + jnp.abs(flux_dn) + 1e-8)
+                    # (b) 过渡带平滑：界面附近 ±band 层的 uz 逐点与"层平均热流"的
+                    #     偏差（鼓励光滑过渡而非单点跳变），叠加到界面相对误差上
+                    band = int(os.environ.get('DHV_IFACE_BAND', '3'))
+                    z0, z1 = max(zi - band, 0), min(zi + band, nz)
+                    k_band = k_field[:, :, :, z0:z1, :] * K_SCALE        # [B,nx,ny,nb,1]
+                    uz_band = uz[:, :, :, z0:z1, :]
+                    flux_band = k_band * uz_band
+                    flux_mean = jnp.mean(flux_band, axis=3, keepdims=True)
+                    smooth = jnp.mean((flux_band - flux_mean) ** 2) / (jnp.mean(flux_band ** 2) + 1e-8)
+                    interface_loss += jnp.mean(rel ** 2) + smooth
+                else:
+                    # 旧版(消融对照): 单点绝对差
+                    interface_loss += jnp.mean((k_above*uz_above - k_below*uz_below)**2)
             interface_loss = interface_loss / len(z_ifaces) * DHV_IFACE_LAM   # 平均到每个界面
         else:
             interface_loss = 0.0
@@ -285,11 +333,57 @@ if __name__ == '__main__':
     u_test = np.load('data/u_test_volume.npy')
     print(f'评估真值: data/u_test_volume.npy (Icepak 真实温度场, 形状 {u_test.shape})')
 
-    # result dir
+    # ---------------------------------------------------------------------------
+    # 固定协议：验证集早停选优（2026-08-28）
+    # ---------------------------------------------------------------------------
+    # 90 个训练样本按 seed 确定性地划出 N_VAL 个做验证集（不参与训练），
+    # 每 eval_every 轮在验证集评 MAPE，保留历史最优权重，训练结束用最优权重
+    # 做最终测试评估。baseline 与 3d5 同协议同轮数。测试集只在最后碰一次。
+    # 环境变量 DHV_VALSEL=0 可关闭（回到旧行为：末轮权重直接评估）。
+    N_VAL = int(os.environ.get('DHV_N_VAL', '10'))
+    EVAL_EVERY = int(os.environ.get('DHV_EVAL_EVERY', '500'))
+    VALSEL_ON = os.environ.get('DHV_VALSEL', '1') == '1'
+    if VALSEL_ON:
+        n_train_total = fs_train.shape[0]
+        if n_train_total <= N_VAL:
+            raise SystemExit(f'[valsel] 训练样本 {n_train_total} <= 验证集大小 {N_VAL}，无法划分')
+        # 按 seed 确定性划分：所有模型同一 seed 划出同一批验证样本（公平）
+        _rng = np.random.default_rng(args.seed)
+        _perm = _rng.permutation(n_train_total)
+        _val_idx = np.sort(_perm[:N_VAL])
+        _tr_idx = np.sort(_perm[N_VAL:])
+        # 训练采样器只用 _tr_idx 行；memmap 索引包装成普通 ndarray 视图
+        class _RowView:
+            """memmap 行选择视图：fs[idx, :] 只读请求的行，不复制全量。
+
+            支持标量与数组索引（deepoheat_st_train_generator 用 fs[idx, :]，
+            idx 为 numpy 数组）。"""
+            def __init__(self, fs, rows):
+                self._fs, self._rows = fs, np.asarray(rows)
+                self.shape = (len(rows), fs.shape[1])
+            def __getitem__(self, i):
+                # 兼容 view[idx, :] (元组) 与 view[idx] (标量/数组) 两种写法
+                if isinstance(i, tuple):
+                    i = i[0]
+                return self._fs[self._rows[i], :]
+        fs_train_all = fs_train
+        fs_train = _RowView(fs_train, _tr_idx)
+        u_val = np.load('data/u_train_volume.npy')[_val_idx]        # 验证真值
+        if args.mode == '3d5':
+            fs_val = np.load(f'data/fs_train_3d5_volume{_suf}.npy', mmap_mode='r')[_val_idx]
+        else:
+            fs_val = np.load('data/fs_train_volume.npy', mmap_mode='r').reshape(-1, 101**2)[_val_idx]
+        print(f'[valsel] 训练 {len(_tr_idx)} / 验证 {len(_val_idx)} (seed={args.seed} 确定性划分)')
+        print(f'[valsel] 验证样本索引: {_val_idx.tolist()}')
+        print(f'[valsel] 每 {EVAL_EVERY} 轮评一次验证 MAPE, 保留最优权重')
+
+    # result dir（带 seed 后缀：多 seed 固定协议下不同种子不互相覆盖）
     root_dir = os.path.join(os.getcwd(), 'results', 'results_volume', args.model_name)
+    _vs = '_valsel' if VALSEL_ON else ''
     result_dir = os.path.join(root_dir, 'nf'+str(args.batch)+'_nc'+str(args.nc) + '_branch_' + str(args.branch_depth) +
                               '_'+str(args.branch_hidden)+'_trunk_' + str(args.trunk_depth) +
-                              '_'+str(args.trunk_hidden)+'_r'+ str(args.r) + '_mode_' + str(args.mode))
+                              '_'+str(args.trunk_hidden)+'_r'+ str(args.r) + '_mode_' + str(args.mode)
+                              + _vs + f'_seed{args.seed}')
     
     # make dir
     os.makedirs(result_dir, exist_ok=True)
@@ -357,6 +451,7 @@ if __name__ == '__main__':
         _zc = jnp.linspace(0, 0.55, nz).reshape(-1, 1)
         k_field = build_k_field(_xc, _yc, _zc)  # [1, nx, nx, nz, 1]
         print(f'[3d5] 分区 k 场已构造, 形状 {k_field.shape}, 值域 [{float(k_field.min()):.5f}, {float(k_field.max()):.4f}]')
+        print(f'[3d5] 功率幅值修正 DHV_POWER_SCALE={DHV_POWER_SCALE} (量纲解析推导; 设 1 可关闭)')
         loss_fn = lambda model, xc, yc, zc, fc: apply_model_deepoheat_st(model, xc, yc, zc, fc, k_field=k_field, power_dim=args.nc**2, nc=args.nc)
     else:
         # baseline 模式：与原版完全一致
@@ -364,7 +459,23 @@ if __name__ == '__main__':
   
 
     # train the model
-    model, optimizer, opt_state, runtime = train_loop(model, optimizer, opt_state, update_fn, train_generator, loss_fn, args.epochs, args.log_epoch, result_dir, args.device_name, subkey)
+    if VALSEL_ON:
+        # 固定协议：每 EVAL_EVERY 轮在验证集评 MAPE，训练结束回填最优权重。
+        # 验证评估 = eval_heat3d 的 MAPE 均值（与最终测试同口径），baseline/3d5 相同。
+        def val_eval_fn(m):
+            _, _, _, _, _, _, vm, _, _, _ = eval_heat3d(m, test_generator, fs_val, u_val, result_dir)
+            return vm
+        model, optimizer, opt_state, runtime, best_epoch, best_mape = train_loop_valsel(
+            model, optimizer, opt_state, update_fn, train_generator, loss_fn,
+            args.epochs, args.log_epoch, result_dir, args.device_name, subkey,
+            val_eval_fn=val_eval_fn, eval_every=EVAL_EVERY)
+        print(f'[valsel] 最优权重 @epoch {best_epoch}, 验证 MAPE={best_mape:.6f}')
+        with open(os.path.join(result_dir, 'valsel_summary.txt'), 'w') as f:
+            f.write(f'seed={args.seed}\nbest_epoch={best_epoch}\nbest_val_mape={best_mape}\n'
+                    f'n_val={N_VAL}\neval_every={EVAL_EVERY}\n'
+                    f'val_idx={_val_idx.tolist()}\n')
+    else:
+        model, optimizer, opt_state, runtime = train_loop(model, optimizer, opt_state, update_fn, train_generator, loss_fn, args.epochs, args.log_epoch, result_dir, args.device_name, subkey)
     
     # save the model
     eqx.tree_serialise_leaves(os.path.join(result_dir,args.model_name+'_trained_model.eqx'),model)
