@@ -399,10 +399,13 @@ def muon2(learning_rate, momentum=0.95, beta2=0.999, eps=1e-8, ns_steps=5):
 
 def branch_2d_labels(pytree):
     """构造 multi_transform 的标签树：branch 下的 2D 权重矩阵标 'muon2'，
-    其余（trunk/bias/1D/non-array）标 'adam'。遍历叶子路径判断。
+    其余（trunk/bias/1D/非数组叶子）标 'adam'。
 
-    optax 0.2.8 multi_transform 期望 (labels 树, transforms 字典)——与
-    一次性传入 True/False mask 的旧版 API 不同，这里直接输出字符串标签。
+    注意：必须基于【完整 model】（未 eqx.filter）构造——optax 0.2.8 的
+    multi_transform 在 update 时会用该树对 params（=完整 model）做结构对齐，
+    若 label 树是 filter 后的（非数组字段变 None）会报"不同子树类型"错误。
+    这里把数组叶子 + 所有非数组叶子（int/float/str/bool）都当叶子处理，
+    非数组叶子统一标 'adam'（它们不是梯度，multi_transform 对它们无操作）。
     """
     def label_of(path, leaf):
         if not (hasattr(leaf, 'ndim') and leaf.ndim == 2):
@@ -411,8 +414,14 @@ def branch_2d_labels(pytree):
             if hasattr(key, 'name') and key.name == 'branch':
                 return 'muon2'
         return 'adam'
-    return jax.tree_util.tree_map_with_path(
-        label_of, pytree, is_leaf=lambda x: eqx.is_array(x))
+    # is_leaf：数组=叶子；Module/list/tuple/dict=容器需深入；其余标量(int/str/bool)=叶子。
+    def is_leaf(x):
+        if eqx.is_array(x):
+            return True
+        if isinstance(x, (eqx.Module, list, tuple, dict)):
+            return False
+        return True
+    return jax.tree_util.tree_map_with_path(label_of, pytree, is_leaf=is_leaf)
 
 
 # 注意：这个函数不能用 jax.jit，否则 JAX 会把整个 memmap 数组（24GB）
