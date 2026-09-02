@@ -154,8 +154,10 @@ run_one() { # mode tag seed extra_env
 
 for seed in $SEEDS; do
     run_one baseline baseline_mode         "$seed" ""
-    run_one 3d5      mode_3d5_full         "$seed" ""
-    run_one 3d5      mode_3d5_no_interface "$seed" "DHV_NO_INTERFACE=1"
+    # A2: 3d5 两组默认 DHV_FVM_IFACE=1（FVM 调和平均处理界面，替代显式界面项）。
+    #   no_interface 组仍保留 DHV_NO_INTERFACE=1 做"无界面"消融（但 PDE 已是 FVM）。
+    run_one 3d5      mode_3d5_full         "$seed" "DHV_FVM_IFACE=1"
+    run_one 3d5      mode_3d5_no_interface "$seed" "DHV_FVM_IFACE=1 DHV_NO_INTERFACE=1"
 done
 
 # ---- 8. 汇总对比（多 seed: mean±std）----
