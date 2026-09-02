@@ -397,18 +397,22 @@ def muon2(learning_rate, momentum=0.95, beta2=0.999, eps=1e-8, ns_steps=5):
     return optax.GradientTransformation(init_fn, update_fn)
 
 
-def branch_2d_mask(pytree):
-    """构造 multi_transform mask：True = branch 下的 2D 权重矩阵（用 Muon2），
-    False = 其余（用 Adam）。遍历叶子路径，路径中含 'branch' 且 leaf.ndim==2。"""
-    def is_branch2d(path, leaf):
+def branch_2d_labels(pytree):
+    """构造 multi_transform 的标签树：branch 下的 2D 权重矩阵标 'muon2'，
+    其余（trunk/bias/1D/non-array）标 'adam'。遍历叶子路径判断。
+
+    optax 0.2.8 multi_transform 期望 (labels 树, transforms 字典)——与
+    一次性传入 True/False mask 的旧版 API 不同，这里直接输出字符串标签。
+    """
+    def label_of(path, leaf):
         if not (hasattr(leaf, 'ndim') and leaf.ndim == 2):
-            return False
-        # 路径里的属性名（如 ('branch', 'layers', 0, 'weight') → 含 'branch'）
+            return 'adam'
         for key in path:
             if hasattr(key, 'name') and key.name == 'branch':
-                return True
-        return False
-    return jax.tree_util.tree_map_with_path(is_branch2d, pytree, is_leaf=lambda x: eqx.is_array(x))
+                return 'muon2'
+        return 'adam'
+    return jax.tree_util.tree_map_with_path(
+        label_of, pytree, is_leaf=lambda x: eqx.is_array(x))
 
 
 # 注意：这个函数不能用 jax.jit，否则 JAX 会把整个 memmap 数组（24GB）
@@ -595,15 +599,19 @@ if __name__ == '__main__':
     key, subkey = jax.random.split(key, 2)
 
     # init model
+    #   注意：model 不再用 eqx.filter_jit 外层包裹——loss_fn/update 本身已是
+    #   filter_jit（apply_model_deepoheat_st / train.update），结果显示外层包
+    #   会扭曲参数树路径（插入 _fun wrapper），导致 optax.multi_transform 的
+    #   标签树与 params 结构不对齐。改用原始 model，params/labels 同源。
     if args.model_name == 'DeepOHeat_ST':
-        model = eqx.filter_jit(DeepOHeat_ST(dim=args.dim, branch_dim=args.branch_dim, field_dim=args.field_dim, 
-                                                           branch_depth=args.branch_depth, branch_hidden=args.branch_hidden, trunk_depth=args.trunk_depth, 
-                                                           trunk_hidden=args.trunk_hidden, rank=args.r, key=subkey))
+        model = DeepOHeat_ST(dim=args.dim, branch_dim=args.branch_dim, field_dim=args.field_dim,
+                             branch_depth=args.branch_depth, branch_hidden=args.branch_hidden, trunk_depth=args.trunk_depth,
+                             trunk_hidden=args.trunk_hidden, rank=args.r, key=subkey)
     else:
-        model = eqx.filter_jit(DeepOHeat_v1(dim=args.dim, branch_dim=args.branch_dim, field_dim=args.field_dim,
-                                                        branch_depth=args.branch_depth, branch_hidden=args.branch_hidden, trunk_depth=args.trunk_depth,
-                                                        trunk_hidden=args.trunk_hidden, rank=args.r, channels=args.channels, key=subkey))
-    
+        model = DeepOHeat_v1(dim=args.dim, branch_dim=args.branch_dim, field_dim=args.field_dim,
+                             branch_depth=args.branch_depth, branch_hidden=args.branch_hidden, trunk_depth=args.trunk_depth,
+                             trunk_hidden=args.trunk_hidden, rank=args.r, channels=args.channels, key=subkey)
+
     # Filter the model to get only the trainable parameters
     params = eqx.filter(model, eqx.is_array)
     # Count the total number of parameters by summing the size of each array
@@ -615,9 +623,14 @@ if __name__ == '__main__':
     #   mask 需要 params 形状，故须在 model init 之后确定。
     schedule = optax.exponential_decay(args.lr, 1000, 0.9)
     if DHV_MUON2:
-        mask = branch_2d_mask(params)
-        n_muon = sum(1 for x in jax.tree_util.tree_leaves(mask) if x)
-        optimizer = optax.multi_transform([muon2(args.lr), optax.adam(schedule)], mask)
+        # optax 0.2.8 的 multi_transform 签名：
+        #   (transforms: Mapping[label->transform], param_labels: 标签树)
+        # 故 branch 2D 权重标 'muon2'，其余标 'adam'，transforms 用 dict。
+        # model 未包 filter_jit（见上），params/labels 同源同结构，可对齐。
+        labels = branch_2d_labels(params)
+        n_muon = sum(1 for x in jax.tree_util.tree_leaves(labels) if x == 'muon2')
+        optimizer = optax.multi_transform(
+            {'muon2': muon2(args.lr), 'adam': optax.adam(schedule)}, labels)
         print(f'[opt] Muon2(branch 2D矩阵, {n_muon} 个) + Adam(其余)，multi_transform 组装')
     else:
         optimizer = optax.adam(schedule)
