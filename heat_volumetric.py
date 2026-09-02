@@ -34,6 +34,17 @@ DHV_BC_BOT_KH    = float(os.environ.get('DHV_BC_BOT_KH', '0.3056'))
 #   唯一系数（x/z 坐标缩放不一致 + 依赖几何/边界），故不做伪"理论值"。
 # 默认 1.0 = 关闭修正（回到旧行为）；baseline 分支不受此变量影响，保持原版。
 DHV_POWER_SCALE = float(os.environ.get('DHV_POWER_SCALE', '1.0'))
+# ---------------------------------------------------------------------------
+# FVM 能量形式损失开关（2026-09-02，借鉴 DeepOHeat-v2，见 energy_loss_fvm）
+#   DHV_ENERGY=1: 3d5 分支用 FVM 能量形式替代强形式平方残差（条件数 κ²→κ），
+#   并通过调和平均自动处理界面通量连续（此时显式界面项自动关闭）。
+#   baseline 分支不受影响，保持论文原版。
+DHV_ENERGY = os.environ.get('DHV_ENERGY', '0') == '1'
+# A2: FVM 调和平均替代显式界面项。DHV_FVM_IFACE=1 时 3d5 分支 PDE 残差改用
+#   fvm_strong_loss（∇·(k∇u)+q 的平方，界面由调和平均自动处理），此时显式界面项
+#   自动关闭。可与 DHV_ENERGY 组合(DHV_ENERGY=1 时本开关自动视为开启语义)。
+#   DHV_IFACE_V2 相对误差+过渡带仍为默认的"显式界面项"方案(消融对照)。
+DHV_FVM_IFACE = os.environ.get('DHV_FVM_IFACE', '0') == '1'
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -117,23 +128,42 @@ def apply_model_deepoheat_st(model, xc, yc, zc, fc, lam_b=1., k_field=None, powe
             # 改为注入 z=0.40~0.55（die 层）。baseline 分支保持原版位置不动。
             k_die_bot = int(round(0.40 / dz))     # z=0.40 die 底
             k_die_top = int(round(0.55 / dz))     # z=0.55 die 顶（=上层边界）
-            # die 下方（z<0.40：Substrate/Interposer/TIM）无功率：
-            #   开启归一化 => 只用 ∇²u（无源区 k∇²u=0 ⇔ ∇²u=0）; 关闭 => k_field·∇²u
-            if DHV_K_NORM:
-                below = laplacian[:,:,:,0:k_die_bot,:]
+            if DHV_ENERGY or DHV_FVM_IFACE:
+                # ---- FVM 离散损失（DeepOHeat-v2）----
+                # 界面通量连续由调和平均面电导自动处理（无需显式界面项，见下方关闭）；
+                # 不需要 AD 二阶导 laplacian，直接组装 ∇·(k∇u)。
+                qz = jnp.zeros((u.shape[0], nc, nc, nz, 1))
+                f_r = f_power.reshape(-1, nc, nc, 1, 1)
+                qz = qz.at[:, :, :, k_die_bot:k_die_bot+1, :].set(f_r.astype(qz.dtype))
+                qz = qz.at[:, :, :, k_die_bot+1:k_die_top, :].set((2*f_r).astype(qz.dtype))
+                qz = qz.at[:, :, :, k_die_top:k_die_top+1, :].set(f_r.astype(qz.dtype))
+                dx_e = 1.0 / (nc - 1)
+                dy_e = 1.0 / (nc - 1)
+                dz_e = 0.55 / (nz - 1)
+                # k_field: [1,nc,nc,nz,1]（值域 0.00038~0.1，与训练残差同口径）
+                if DHV_ENERGY:
+                    pde_res = energy_loss_fvm(u, k_field, qz, dx_e, dy_e, dz_e)   # 标量能量
+                else:
+                    pde_res = fvm_strong_loss(u, k_field, qz, dx_e, dy_e, dz_e)   # FVM 强形式标量
             else:
-                below = k_field[:,:,:,0:k_die_bot,:] * laplacian[:,:,:,0:k_die_bot,:]
-            # die 底 1 层（z=0.40）×1 功率
-            bot_pow = k_field[:,:,:,k_die_bot:k_die_bot+1,:] * laplacian[:,:,:,k_die_bot:k_die_bot+1,:] \
-                      + f_power.reshape(-1, nc, nc, 1, 1)
-            # die 中部（z=0.41~0.54）×2 功率
-            int_pow = k_field[:,:,:,k_die_bot+1:k_die_top,:] * laplacian[:,:,:,k_die_bot+1:k_die_top,:] \
-                      + 2 * f_power.reshape(-1, nc, nc, 1, 1)
-            # die 顶 1 层（z=0.55）×1 功率
-            top_pow = k_field[:,:,:,k_die_top:k_die_top+1,:] * laplacian[:,:,:,k_die_top:k_die_top+1,:] \
-                      + f_power.reshape(-1, nc, nc, 1, 1)
-            # 拼接（z 从大到小，与 baseline 分支组织方式一致）
-            pde_res = jnp.concatenate([top_pow, int_pow, bot_pow, below], axis=3)
+                # ---- 原连续强形式平方残差（默认，界面靠显式界面项）----
+                # die 下方（z<0.40：Substrate/Interposer/TIM）无功率：
+                #   开启归一化 => 只用 ∇²u（无源区 k∇²u=0 ⇔ ∇²u=0）; 关闭 => k_field·∇²u
+                if DHV_K_NORM:
+                    below = laplacian[:,:,:,0:k_die_bot,:]
+                else:
+                    below = k_field[:,:,:,0:k_die_bot,:] * laplacian[:,:,:,0:k_die_bot,:]
+                # die 底 1 层（z=0.40）×1 功率
+                bot_pow = k_field[:,:,:,k_die_bot:k_die_bot+1,:] * laplacian[:,:,:,k_die_bot:k_die_bot+1,:] \
+                          + f_power.reshape(-1, nc, nc, 1, 1)
+                # die 中部（z=0.41~0.54）×2 功率
+                int_pow = k_field[:,:,:,k_die_bot+1:k_die_top,:] * laplacian[:,:,:,k_die_bot+1:k_die_top,:] \
+                          + 2 * f_power.reshape(-1, nc, nc, 1, 1)
+                # die 顶 1 层（z=0.55）×1 功率
+                top_pow = k_field[:,:,:,k_die_top:k_die_top+1,:] * laplacian[:,:,:,k_die_top:k_die_top+1,:] \
+                          + f_power.reshape(-1, nc, nc, 1, 1)
+                # 拼接（z 从大到小，与 baseline 分支组织方式一致）
+                pde_res = jnp.mean(jnp.concatenate([top_pow, int_pow, bot_pow, below], axis=3) ** 2)
         else:
             # baseline 模式：原版分段（各 z 段固定 k）
             pde_res = jnp.concatenate([0.1*laplacian[:,:,:,k_top_inj+1:,:],
@@ -142,7 +172,7 @@ def apply_model_deepoheat_st(model, xc, yc, zc, fc, lam_b=1., k_field=None, powe
                                         k_bottom*laplacian_bottom_power+f_power.reshape(-1, nc, nc, 1, 1),
                                         0.1*laplacian[:,:,:,0:k_bot_inj,:]
                 ],axis=3)
-        pde_res = jnp.mean(pde_res**2)
+            pde_res = jnp.mean(pde_res**2)
 
 
         # top surface (Robin: u ± α·uz = u_amb，符号按外法向)
@@ -184,7 +214,9 @@ def apply_model_deepoheat_st(model, xc, yc, zc, fc, lam_b=1., k_field=None, powe
         #       再比较 —— 网络只需光滑过渡，不需单点突变 —— 修复②。
         #       物理依据：真实界面是微米级过渡层，不是数学突变面。
         #   DHV_IFACE_V2=0 可切回旧版实现（严格消融用）。
-        if k_field is not None and not DHV_NO_INTERFACE:
+        # DHV_ENERGY=1 时，界面通量连续已由 FVM 调和平均自动处理（见 energy_loss_fvm），
+        # 显式界面项应关闭（否则重复且可能再度冲突）。
+        if k_field is not None and not DHV_NO_INTERFACE and not DHV_ENERGY and not DHV_FVM_IFACE:
             DHV_IFACE_V2 = os.environ.get('DHV_IFACE_V2', '1') == '1'
             z_ifaces = (0.10, 0.35)            # 训练坐标系 z 界面位置（mm）
             interface_loss = 0.0
@@ -230,8 +262,71 @@ def apply_model_deepoheat_st(model, xc, yc, zc, fc, lam_b=1., k_field=None, powe
 
 
 #########################################################################
-# Train generator
+# FVM 调和平均离散（2026-09-02，借鉴 DeepOHeat-v2 论文 arXiv:2608.16080v1）
 #########################################################################
+# 论文核心两个独立问题：
+#   ① 界面：光滑网络画不出"界面处连续但不可导"的温度场(Prop.1/2)。正解=不用
+#      连续强形式，改用有限体积(FVM)离散 + 调和平均面电导 2k1k2/(k1+k2)，界面
+#      热流连续由离散格式自动保证 → 无需任何显式界面项。
+#   ② 优化：平方残差 ‖Ah·u−q‖² 的 Hessian 条件数 κ²，高对比度下一阶优化走不动；
+#      能量形式 ½uᵀAh·u − qᵀu 条件数降为 κ（同一解更好优化）。
+# 本段实现：fvm_div_k_grad 组装逐点 ∇·(k∇u)（调和平均界面，供两种损失共用）；
+#   energy_loss_fvm = 能量形式（开关 DHV_ENERGY=1）；
+#   fvm_strong_loss  = FVM 强形式平方 ‖∇·(k∇u)+q‖²（开关 DHV_FVM_IFACE=1，即 A2：
+#                      用调和平均替代显式界面项，但仍保持强形式平方）。
+# baseline 分支均不受影响。
+def fvm_div_k_grad(u, k, dx, dy, dz):
+    """FVM 逐点 ∇·(k∇u)。u: [B,nc,nc,nz,1]; k: [1,nc,nc,nz,1](已缩放)。
+
+    界面面电导用调和平均 G=2k1k2/(k1+k2)，自动保证界面热流连续。
+    侧面绝热（边界节点外侧通量=0）。返回与 u 同形状的逐点散度场。
+    """
+    B, NX, NY, NZ, _ = u.shape
+    def kface(kk, axis):
+        L = kk.shape[axis+1]                       # 该轴尺寸（x/y/z 长度不同）
+        k1 = jnp.take(kk, jnp.arange(0, L-1), axis=axis+1)
+        k2 = jnp.take(kk, jnp.arange(1, L), axis=axis+1)
+        return 2.0*k1*k2/(k1+k2+1e-12)
+    kfx = kface(k, 0)   # [1, NX-1, NY, NZ, 1]
+    kfy = kface(k, 1)   # [1, NX, NY-1, NZ, 1]
+    kfz = kface(k, 2)   # [1, NX, NY, NZ-1, 1]
+    # 各向异性：与训练坐标一致（x,y∈[0,1] 归一化 10mm, z∈[0,0.55] 归一化 1.8mm），
+    #   面通量除步长平方（dx=dy=1/(nc-1), dz=0.55/(nz-1)）。
+    sx = 1.0/(dx*dx); sy = 1.0/(dy*dy); sz = 1.0/(dz*dz)
+    def div_axis(uu, kf, axis, scale):
+        fr = kf * jnp.diff(uu, axis=axis) * scale      # 面 m 通量（m=0..N-2）
+        padw = [(0,0)]*uu.ndim
+        padw[axis] = (0,1); frp = jnp.pad(fr, padw)     # 右通量末端补0
+        padw[axis] = (1,0); flp = jnp.pad(fr, padw)     # 左通量头部补0
+        return frp - flp                                # 节点 i: f[i] − f[i−1]
+    netx = div_axis(u, kfx, 1, sx)
+    nety = div_axis(u, kfy, 2, sy)
+    netz = div_axis(u, kfz, 3, sz)
+    return netx + nety + netz                           # = ∇·(k∇u)
+
+
+def energy_loss_fvm(u, k, q, dx, dy, dz):
+    """FVM 能量形式：L = ½·mean(u·(−lap)) − mean(q·u)，u 为 [B,nc,nc,nz,1]。
+
+    论文式15：L = ½T̂ᵀAhT̂ − bhᵀT̂，其中 Ah·u = −∇·(k∇u)。
+    条件数 κ（比平方残差 κ² 好优化），解与强形式相同。
+    """
+    lap = fvm_div_k_grad(u, k, dx, dy, dz)
+    energy = 0.5 * jnp.mean(u * (-lap)) - jnp.mean(jnp.broadcast_to(q, u.shape) * u)
+    return energy
+
+
+def fvm_strong_loss(u, k, q, dx, dy, dz):
+    """FVM 强形式平方残差：L = mean((∇·(k∇u) + q)²)。
+
+    A2：界面已由调和平均自动处理（无显式界面项），但仍保持强形式平方
+    （条件数 κ²）。用于与"连续强形式+显式界面项"对照，单独验证
+    调和平均处理界面的效果。
+    """
+    lap = fvm_div_k_grad(u, k, dx, dy, dz)
+    return jnp.mean((lap + jnp.broadcast_to(q, u.shape)) ** 2)
+
+
 # 注意：这个函数不能用 jax.jit，否则 JAX 会把整个 memmap 数组（24GB）
 # 捕获成编译常量，导致 OOM。改用 numpy 随机采样，只把 batch 数据转成 jax 数组。
 # 调用处也必须是普通 lambda（不能包 jax.jit）。
