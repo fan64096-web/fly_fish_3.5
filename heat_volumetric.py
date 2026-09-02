@@ -45,6 +45,11 @@ DHV_ENERGY = os.environ.get('DHV_ENERGY', '0') == '1'
 #   自动关闭。可与 DHV_ENERGY 组合(DHV_ENERGY=1 时本开关自动视为开启语义)。
 #   DHV_IFACE_V2 相对误差+过渡带仍为默认的"显式界面项"方案(消融对照)。
 DHV_FVM_IFACE = os.environ.get('DHV_FVM_IFACE', '0') == '1'
+# A3: Muon2 矩阵预条件优化器（2026-09-02，借鉴 DeepOHeat-v2 论文 Section III.C）。
+#   DHV_MUON2=1 时，branch 的 2D 权重矩阵用 Muon2（矩阵级正交化，处理跨参数耦合
+#   病态），其余参数（trunk ChebyKAN / 各 bias / 1D 参数）用 Adam。
+#   论文只对 branch MLP 权重用 Muon2，故按"路径在 branch 下 + ndim==2"构造 mask。
+DHV_MUON2 = os.environ.get('DHV_MUON2', '0') == '1'
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -327,6 +332,85 @@ def fvm_strong_loss(u, k, q, dx, dy, dz):
     return jnp.mean((lap + jnp.broadcast_to(q, u.shape)) ** 2)
 
 
+#########################################################################
+# Muon2 优化器（2026-09-02，借鉴 DeepOHeat-v2 论文 Section III.C 式21）
+#########################################################################
+# 为什么需要它：Adam 逐元素缩放救不了"跨参数耦合"的病态——当 loss 的条件数
+#   集中在权重矩阵 W 的少数几个方向（stiff+compliant 耦合），entrywise rescale
+#   无法同时把各方向拉平。Muon2 对 2D 权重矩阵做：
+#     1) Adam 式二阶矩预缩放   Mt ⊘ (√Vt + ε)   —— 把各方向拉到 O(1)
+#     2) 正交化 orth(·)        —— 把矩阵的奇异方向全部单位化（跟 Muon 相同的
+#        Newton-Schulz 近似 polar 分解），使更新在 W 的所有方向等强
+#   论文实测：Adam 卡死，Muon 大改善，Muon2 最低。只对 branch 2D 权重用，
+#   trunk(ChebyKAN) 与 1D 参数仍用 Adam。
+# 用法：DHV_MUON2=1 启用（见 main 里 multi_transform 组装）。
+# 状态用 namedtuple（兼容老版本 optax 0.2.x，TransformState 可能不存在）。
+from collections import namedtuple
+_Muon2State = namedtuple('_Muon2State', ['m', 'v'])
+
+
+def _orthogonalize(x, steps=5):
+    """Newton-Schulz 迭代近似矩阵 polar 分解的正交因子 orth(X)（Muon 标准实现）。
+
+    X 应为 2D 矩阵。输出与 X 同奇异方向、奇异值全≈1，使更新在各方向等强。
+    NS 系数 (3.4445,-4.7750,2.0315) 为 NS5 的标准系数。
+    """
+    # 归一化，避免一步爆炸
+    f = jnp.sqrt(jnp.sum(x ** 2)) + 1e-12
+    x = x / f
+    a, b, c = 3.4445, -4.7750, 2.0315
+    for _ in range(steps):
+        xxt = x @ x.T
+        x = a * x + b * (xxt @ x) + c * (xxt @ xxt @ x)
+    # 论文(Section III.C)：正交化后按 Muon 惯例再乘 0.2·dmax/dmin，使 RMS 规模
+    # 与 Adam 步持平。这里把缩放放回调用处（需要矩阵形状信息）。
+    return x
+
+
+def muon2(learning_rate, momentum=0.95, beta2=0.999, eps=1e-8, ns_steps=5):
+    """Muon2 优化器（optax 兼容）。仅用于 2D 权重矩阵。
+
+    式21:  W_{t+1} = W_t − η · orth(M_t ⊘ (√V_t + ε)) · 0.2·dmax/dmin
+      M_t = µ·M_{t-1} + G_t
+      V_t = β·V_{t-1} + (1−β)·G_t⊙G_t
+    """
+    def init_fn(params):
+        m = jax.tree_util.tree_map(jnp.zeros_like, params)
+        v = jax.tree_util.tree_map(jnp.zeros_like, params)
+        return _Muon2State(m, v)
+
+    def update_fn(grads, state, params=None):
+        m, v = state.m, state.v
+        new_m = jax.tree_util.tree_map(lambda g, old: momentum * old + g, grads, m)
+        new_v = jax.tree_util.tree_map(
+            lambda g, old: beta2 * old + (1.0 - beta2) * (g * g), grads, v)
+        def per_leaf(g, nm, nv):
+            adv = nm / (jnp.sqrt(nv) + eps)                # Adam 式预缩放
+            orth = _orthogonalize(adv, ns_steps)           # 正交化
+            dmax = max(orth.shape) if orth.ndim >= 2 else 1.0
+            dmin = min(orth.shape) if orth.ndim >= 2 else 1.0
+            scale = 0.2 * dmax / dmin                      # 论文比例
+            return learning_rate * scale * orth
+        updates = jax.tree_util.tree_map(per_leaf, grads, new_m, new_v)
+        return updates, _Muon2State(new_m, new_v)
+
+    return optax.GradientTransformation(init_fn, update_fn)
+
+
+def branch_2d_mask(pytree):
+    """构造 multi_transform mask：True = branch 下的 2D 权重矩阵（用 Muon2），
+    False = 其余（用 Adam）。遍历叶子路径，路径中含 'branch' 且 leaf.ndim==2。"""
+    def is_branch2d(path, leaf):
+        if not (hasattr(leaf, 'ndim') and leaf.ndim == 2):
+            return False
+        # 路径里的属性名（如 ('branch', 'layers', 0, 'weight') → 含 'branch'）
+        for key in path:
+            if hasattr(key, 'name') and key.name == 'branch':
+                return True
+        return False
+    return jax.tree_util.tree_map_with_path(is_branch2d, pytree, is_leaf=lambda x: eqx.is_array(x))
+
+
 # 注意：这个函数不能用 jax.jit，否则 JAX 会把整个 memmap 数组（24GB）
 # 捕获成编译常量，导致 OOM。改用 numpy 随机采样，只把 batch 数据转成 jax 数组。
 # 调用处也必须是普通 lambda（不能包 jax.jit）。
@@ -506,10 +590,6 @@ if __name__ == '__main__':
     # update function
     update_fn = update
 
-    # define the optimizer
-    schedule = optax.exponential_decay(args.lr,1000,0.9)
-    optimizer = optax.adam(schedule)
-
     # random key
     key = jax.random.PRNGKey(args.seed)
     key, subkey = jax.random.split(key, 2)
@@ -529,6 +609,18 @@ if __name__ == '__main__':
     # Count the total number of parameters by summing the size of each array
     num_params = sum(jax.tree_util.tree_leaves(jax.tree_util.tree_map(lambda x: x.size, params)))
     print(f'Total number of parameters: {num_params}')
+
+    # define the optimizer
+    #   A3: DHV_MUON2=1 时 branch 2D 权重用 Muon2，其余参数用 Adam（multi_transform）。
+    #   mask 需要 params 形状，故须在 model init 之后确定。
+    schedule = optax.exponential_decay(args.lr, 1000, 0.9)
+    if DHV_MUON2:
+        mask = branch_2d_mask(params)
+        n_muon = sum(1 for x in jax.tree_util.tree_leaves(mask) if x)
+        optimizer = optax.multi_transform([muon2(args.lr), optax.adam(schedule)], mask)
+        print(f'[opt] Muon2(branch 2D矩阵, {n_muon} 个) + Adam(其余)，multi_transform 组装')
+    else:
+        optimizer = optax.adam(schedule)
     
     # init state
     key, subkey = jax.random.split(key)
