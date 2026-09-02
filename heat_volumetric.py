@@ -629,8 +629,13 @@ if __name__ == '__main__':
         # model 未包 filter_jit（见上），params/labels 同源同结构，可对齐。
         labels = branch_2d_labels(params)
         n_muon = sum(1 for x in jax.tree_util.tree_leaves(labels) if x == 'muon2')
+        # 注意：optax 0.2.8 的 multi_transform 若 param_labels 是"可调用对象"就
+        # 会调用它。而我们的标签树 root 是 DeepOHeat_v1 Module（含 __call__），
+        # 整个树 callable()==True → optax 误把标签树当函数调用 model → 崩。
+        # 解法：显式传"返回标签树的函数"，optax 会正确调用之拿到纯标签树。
+        param_labels_fn = lambda p: branch_2d_labels(p)
         optimizer = optax.multi_transform(
-            {'muon2': muon2(args.lr), 'adam': optax.adam(schedule)}, labels)
+            {'muon2': muon2(args.lr), 'adam': optax.adam(schedule)}, param_labels_fn)
         print(f'[opt] Muon2(branch 2D矩阵, {n_muon} 个) + Adam(其余)，multi_transform 组装')
     else:
         optimizer = optax.adam(schedule)
