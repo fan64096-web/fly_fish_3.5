@@ -21,4 +21,6 @@ data/
 .vscode/
 
 # git 锁（异常残留）
-.git/index.lock
+
+# Icepak 预测产物（体积大，不入库）
+*.tar.gz
