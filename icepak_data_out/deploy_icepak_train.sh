@@ -153,11 +153,12 @@ run_one() { # mode tag seed extra_env
 }
 
 for seed in $SEEDS; do
-    run_one baseline baseline_mode         "$seed" ""
-    # A2: 3d5 两组默认 DHV_FVM_IFACE=1（FVM 调和平均处理界面，替代显式界面项）。
-    #   no_interface 组仍保留 DHV_NO_INTERFACE=1 做"无界面"消融（但 PDE 已是 FVM）。
-    run_one 3d5      mode_3d5_full         "$seed" "DHV_FVM_IFACE=1"
-    run_one 3d5      mode_3d5_no_interface "$seed" "DHV_FVM_IFACE=1 DHV_NO_INTERFACE=1"
+    run_one baseline baseline_mode       "$seed" ""
+    # 2026-09-04 主配置决议:
+    #   main    = 臂B: fvm 能量形式(调和平均界面内建, v2 核心配方) —— 主配置
+    #   hotspot = 臂A: 连续泛函能量 + 显式界面项 v2 —— 极端热点强化配置
+    run_one 3d5      mode_3d5_main       "$seed" "DHV_ENERGY=1"
+    run_one 3d5      mode_3d5_hotspot    "$seed" "DHV_ENERGY=1 DHV_ENERGY_FORM=continuous"
 done
 
 # ---- 8. 汇总对比（多 seed: mean±std）----
@@ -190,8 +191,8 @@ def best_val(tag, s):
     vals = [float(r.split(',')[1]) for r in rows]
     return min(vals)
 groups = [("baseline_mode", "baseline(原版)"),
-          ("mode_3d5_full", "3d5(分区k+界面)"),
-          ("mode_3d5_no_interface", "3d5-无界面(消融)")]
+          ("mode_3d5_main", "3d5主配置(fvm能量)"),
+          ("mode_3d5_hotspot", "3d5热点强化(cont+界面)")]
 table = {}
 for tag, label in groups:
     rel2s, mapes, vmapes = [], [], []
