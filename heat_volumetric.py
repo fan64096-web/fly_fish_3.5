@@ -803,8 +803,13 @@ if __name__ == '__main__':
         #   同事教训：尾段权重被污染时 avg 会被本机制自动拒绝（非保险丝）。
         soup_used = False
         if DHV_SOUP and final_model is not None:
-            avg_model = jax.tree_util.tree_map(lambda a, b: 0.5 * (a + b),
-                                               model, final_model)
+            # 注意：模型 pytree 里有非数组叶子（ChebyKAN filter_vmap 的 if_array
+            # 轴哨兵、int 静态字段）——它们不能做加法，且两树取值相同，原样保留。
+            def _soup_leaf(a, b):
+                if isinstance(a, jax.Array) and isinstance(b, jax.Array):
+                    return 0.5 * (a + b)
+                return a
+            avg_model = jax.tree_util.tree_map(_soup_leaf, model, final_model)
             val_avg = float(val_eval_fn(avg_model))
             soup_used = val_avg < float(best_mape)
             print(f"[soup] avg(best,final) 验证 MAPE={val_avg:.6f} vs best={float(best_mape):.6f} "
