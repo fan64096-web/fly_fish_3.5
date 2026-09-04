@@ -58,14 +58,11 @@ DHV_MUON2 = os.environ.get('DHV_MUON2', '0') == '1'
 #   共用同一套 80/10 划分——multi-seed 的 std 只反映初始化差异，不含划分差异；
 #   且堵死"多试 seed 顺带挑到好划分"的隐性口子。可用 DHV_SPLIT_SEED 覆盖。
 DHV_SPLIT_SEED = int(os.environ.get('DHV_SPLIT_SEED', '12345'))
-# [选优口径] 验证集选优指标（2026-09-04 决议：主指标=峰值温度误差，平均口径并列保留）。
-#   默认 both = 双指标均衡选优：对每个评估点计算
-#     score = 峰值/历史最优峰值 + 平均/历史最优平均   （两项各自≥1，越小越好）
-#   前沿归一化、无需人工权重，峰值与平均谁都不偏废。
-#   可选: both(默认)/max_l1(仅峰值)/pape/mape(仅平均,旧行为)/rel_l2/rmse。
-#   教训（2026-09-04 公平性审计）：选优指标必须覆盖汇报指标，
-#   否则等于用错误的尺子挑权重。
-DHV_VAL_METRIC = os.environ.get('DHV_VAL_METRIC', 'both')
+# [选优口径] 验证集选优指标（2026-09-04 v3 决议：主指标=平均误差，选优与主指标
+#   一致，默认 mape）。峰值口径(Tmax/热点)作为次要指标报告，对应选优可显式
+#   设 max_l1/pape；both=峰值+平均前沿归一化均衡选优（并列 bug 已修复: <→<=）。
+#   可选: mape(默认)/max_l1/pape/rel_l2/rmse/both。
+DHV_VAL_METRIC = os.environ.get('DHV_VAL_METRIC', 'mape')
 _VAL_METRIC_IDX = {'rel_l2': 0, 'rmse': 2, 'max_l1': 4, 'mape': 6, 'pape': 8}
 # [P2-6] 学习率调度：exp=原版 exponential_decay(1e-3,1000,0.9)；
 #   cosine=5% 线性 warmup + 余弦退火 + 尾部地板 DHV_LR_MIN_FRAC（默认 2%）。
