@@ -102,7 +102,11 @@ def train_loop_valsel(model, optimizer, opt_state, update_fn, train_generator,
             with open(os.path.join(result_dir, 'log (val mape).csv'), 'a') as f:
                 f.write(f'{epoch+1},{val_mape}\n')
             mark = ''
-            if val_mape < best_mape:
+            # 用 <= 而非 <: both 模式下"双指标同时到达前沿"的点得分恒为 2.0,
+            # 若用 < 则首个评估点(2.0)之后永不更新, 最优权重冻结在epoch500(严重bug)。
+            # <= 语义 = 每个"同时触及双指标前沿"的更晚检查点都覆盖前一快照,
+            # 最终保留训练中最后一个双指标前沿点(且其后的发散点得分>2不会被选)。
+            if val_mape <= best_mape:
                 best_mape = val_mape
                 best_epoch = epoch + 1
                 best_model = snapshot(model)
