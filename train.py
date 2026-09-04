@@ -107,7 +107,10 @@ def train_loop_valsel(model, optimizer, opt_state, update_fn, train_generator,
                 best_epoch = epoch + 1
                 best_model = snapshot(model)
                 mark = '  <-- best'
-            print(f"  [VAL @{epoch+1}] val_mape={val_mape:.6f}{mark}")
+            # 注意: 打印的是 val_eval_fn 的返回值——both 模式下是"选优得分"
+            # (峰值/历史最优+平均/历史最优, 发散插曲时会很大, 无害, 不会被选中),
+            # 单指标模式下才是该指标本身。真实指标轨迹见 _valeval/val_detail.csv。
+            print(f"  [VAL @{epoch+1}] sel_score={val_mape:.6f}{mark}")
 
     runtime = time.time() - start if start is not None else 0.0
 
