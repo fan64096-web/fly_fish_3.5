@@ -664,6 +664,8 @@ if __name__ == '__main__':
             _cfg += f'_clip{DHV_GRAD_CLIP:g}'
         if DHV_ENERGY and DHV_ENERGY_FORM != 'fvm':
             _cfg += f'_ef{DHV_ENERGY_FORM}'
+        if DHV_NO_INTERFACE:
+            _cfg += '_ni'   # 2026-09-04 修复: 缺此前缀导致臂D覆盖臂A同seed结果目录
     if DHV_MUON2:
         _cfg += '_muon2'
     result_dir = os.path.join(root_dir, 'nf'+str(args.batch)+'_nc'+str(args.nc) + '_branch_' + str(args.branch_depth) +
