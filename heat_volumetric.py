@@ -50,6 +50,32 @@ DHV_FVM_IFACE = os.environ.get('DHV_FVM_IFACE', '0') == '1'
 #   病态），其余参数（trunk ChebyKAN / 各 bias / 1D 参数）用 Adam。
 #   论文只对 branch MLP 权重用 Muon2，故按"路径在 branch 下 + ndim==2"构造 mask。
 DHV_MUON2 = os.environ.get('DHV_MUON2', '0') == '1'
+# ---------------------------------------------------------------------------
+# 协议修补与训练稳定性（2026-09-04，借鉴同事 thermal-simulation v5/v6/v7 教训）
+# 全部只作用于 3d5 分支或协议层（对 baseline/3d5 对称），baseline 算法本体不动。
+# ---------------------------------------------------------------------------
+# [P0-1] 验证集划分与训练 seed 解耦（同事 v7 C1）：固定划分 seed，所有训练 seed
+#   共用同一套 80/10 划分——multi-seed 的 std 只反映初始化差异，不含划分差异；
+#   且堵死"多试 seed 顺带挑到好划分"的隐性口子。可用 DHV_SPLIT_SEED 覆盖。
+DHV_SPLIT_SEED = int(os.environ.get('DHV_SPLIT_SEED', '12345'))
+# [P2-6] 学习率调度：exp=原版 exponential_decay(1e-3,1000,0.9)；
+#   cosine=5% 线性 warmup + 余弦退火 + 尾部地板 DHV_LR_MIN_FRAC（默认 2%）。
+#   依据同事 v5 教训：cosine 退到 lr=0 时能量 loss（无下界）尾段发散，
+#   lr floor 部分防住；Adam 与 Muon2 接同一调度（修复原 Muon2 固定 lr 的不对称）。
+DHV_SCHED = os.environ.get('DHV_SCHED', 'exp')
+DHV_LR_MIN_FRAC = float(os.environ.get('DHV_LR_MIN_FRAC', '0.02'))
+# [P2-7] 梯度裁剪（仅 3d5 分支生效；0=关闭）：防 Muon2 大步幅 × 热点 batch 造成的
+#   单步尖峰（同事实测 epoch5701 bc=172.5）。baseline 路径不经过此逻辑。
+DHV_GRAD_CLIP = float(os.environ.get('DHV_GRAD_CLIP', '1.0'))
+# [P2-8] model soup：训练结束评 avg(best, final) 的验证 MAPE，更优才采用。
+#   最坏情况=best（零风险）；同事教训：尾段污染时 avg 会被机制自动拒绝。
+DHV_SOUP = os.environ.get('DHV_SOUP', '1') == '1'
+# [P1-4] 能量形式离散化路线（仅 DHV_ENERGY=1 时有意义）：
+#   fvm=FVM 离散 ½uᵀAh u−qᵀu（我们 9/2 实现，调和平均处理界面）；
+#   continuous=连续泛函 ½∫k|∇u|²−∫q·u（同事 v3 路线，复用 hvp 一阶导）。
+#   两者同解（Euler-Lagrange 均为 k∇²u+q=0），归因实验用：同事 continuous
+#   实测 1.22%，我们 fvm 实测 7.32%，需单变量对比定位差距来源。
+DHV_ENERGY_FORM = os.environ.get('DHV_ENERGY_FORM', 'fvm')
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -147,7 +173,11 @@ def apply_model_deepoheat_st(model, xc, yc, zc, fc, lam_b=1., k_field=None, powe
                 dz_e = 0.55 / (nz - 1)
                 # k_field: [1,nc,nc,nz,1]（值域 0.00038~0.1，与训练残差同口径）
                 if DHV_ENERGY:
-                    pde_res = energy_loss_fvm(u, k_field, qz, dx_e, dy_e, dz_e)   # 标量能量
+                    if DHV_ENERGY_FORM == 'continuous':
+                        # [P1-4] 连续泛函路线（同事 v3）：复用上方 hvp 一阶导
+                        pde_res = energy_loss_continuous(u, k_field, qz, ux, uy, uz)
+                    else:
+                        pde_res = energy_loss_fvm(u, k_field, qz, dx_e, dy_e, dz_e)   # 标量能量
                 else:
                     pde_res = fvm_strong_loss(u, k_field, qz, dx_e, dy_e, dz_e)   # FVM 强形式标量
             else:
@@ -219,9 +249,14 @@ def apply_model_deepoheat_st(model, xc, yc, zc, fc, lam_b=1., k_field=None, powe
         #       再比较 —— 网络只需光滑过渡，不需单点突变 —— 修复②。
         #       物理依据：真实界面是微米级过渡层，不是数学突变面。
         #   DHV_IFACE_V2=0 可切回旧版实现（严格消融用）。
-        # DHV_ENERGY=1 时，界面通量连续已由 FVM 调和平均自动处理（见 energy_loss_fvm），
-        # 显式界面项应关闭（否则重复且可能再度冲突）。
-        if k_field is not None and not DHV_NO_INTERFACE and not DHV_ENERGY and not DHV_FVM_IFACE:
+        # DHV_ENERGY=1 时的界面项语义（2026-09-04 修正，对齐同事源码 v4:75）：
+        #   - form=fvm：界面通量连续已由 FVM 调和平均自动处理 → 显式界面项自动关闭
+        #     （否则重复且可能冲突，维持原行为）；
+        #   - form=continuous：连续泛函无调和平均，界面物理需显式界面项承担
+        #     → 界面项保留（同事 v3/v6 即此配置：energy + 界面 v2 同开）。
+        # DHV_NO_INTERFACE=1 仍为最高优先级关闭开关。
+        _iface_auto_off = DHV_FVM_IFACE or (DHV_ENERGY and DHV_ENERGY_FORM == 'fvm')
+        if k_field is not None and not DHV_NO_INTERFACE and not _iface_auto_off:
             DHV_IFACE_V2 = os.environ.get('DHV_IFACE_V2', '1') == '1'
             z_ifaces = (0.10, 0.35)            # 训练坐标系 z 界面位置（mm）
             interface_loss = 0.0
@@ -321,6 +356,19 @@ def energy_loss_fvm(u, k, q, dx, dy, dz):
     return energy
 
 
+def energy_loss_continuous(u, k, q, ux, uy, uz):
+    """连续能量形式（同事 v3 路线，2026-09-04 借鉴）：L = ½·mean(k|∇u|²) − mean(q·u)。
+
+    变分原理：对 L 求变分得 −∇·(k∇u) − q = 0 ⇔ k∇²u + q = 0，
+    与强形式同解；但只含一阶导数（复用 hvp 已算出的 ux/uy/uz，无需 FVM 组装），
+    Hessian 条件数 κ²→κ（v2 论文 Thm 4 的连续版实现）。
+    与 fvm 版的差异：界面不用调和平均离散，靠 k 场本身 + 网络光滑性处理。
+    注意：mean 离散（非物理体积积分），与 BC 项的 mean 口径一致。
+    """
+    return 0.5 * jnp.mean(k * (ux ** 2 + uy ** 2 + uz ** 2)) \
+        - jnp.mean(jnp.broadcast_to(q, u.shape) * u)
+
+
 def fvm_strong_loss(u, k, q, dx, dy, dz):
     """FVM 强形式平方残差：L = mean((∇·(k∇u) + q)²)。
 
@@ -346,7 +394,7 @@ def fvm_strong_loss(u, k, q, dx, dy, dz):
 # 用法：DHV_MUON2=1 启用（见 main 里 multi_transform 组装）。
 # 状态用 namedtuple（兼容老版本 optax 0.2.x，TransformState 可能不存在）。
 from collections import namedtuple
-_Muon2State = namedtuple('_Muon2State', ['m', 'v'])
+_Muon2State = namedtuple('_Muon2State', ['m', 'v', 'count'])
 
 
 def _orthogonalize(x, steps=5):
@@ -370,16 +418,22 @@ def _orthogonalize(x, steps=5):
 def muon2(learning_rate, momentum=0.95, beta2=0.999, eps=1e-8, ns_steps=5):
     """Muon2 优化器（optax 兼容）。仅用于 2D 权重矩阵。
 
-    式21:  W_{t+1} = W_t − η · orth(M_t ⊘ (√V_t + ε)) · 0.2·dmax/dmin
+    式21:  W_{t+1} = W_t − η_t · orth(M_t ⊘ (√V_t + ε)) · 0.2·dmax/dmin
       M_t = µ·M_{t-1} + G_t
       V_t = β·V_{t-1} + (1−β)·G_t⊙G_t
+    learning_rate 支持标量或调度函数（count→lr）。P2-6：修复原固定 lr 与
+    Adam 衰减调度不对称的问题（交接文档走查第 2 条）。
     """
+    _lr_is_sched = callable(learning_rate)
+
     def init_fn(params):
         m = jax.tree_util.tree_map(jnp.zeros_like, params)
         v = jax.tree_util.tree_map(jnp.zeros_like, params)
-        return _Muon2State(m, v)
+        count = jnp.zeros((), dtype=jnp.int32)
+        return _Muon2State(m, v, count)
 
     def update_fn(grads, state, params=None):
+        lr_t = learning_rate(state.count) if _lr_is_sched else learning_rate
         m, v = state.m, state.v
         new_m = jax.tree_util.tree_map(lambda g, old: momentum * old + g, grads, m)
         new_v = jax.tree_util.tree_map(
@@ -390,9 +444,9 @@ def muon2(learning_rate, momentum=0.95, beta2=0.999, eps=1e-8, ns_steps=5):
             dmax = max(orth.shape) if orth.ndim >= 2 else 1.0
             dmin = min(orth.shape) if orth.ndim >= 2 else 1.0
             scale = 0.2 * dmax / dmin                      # 论文比例
-            return learning_rate * scale * orth
+            return lr_t * scale * orth
         updates = jax.tree_util.tree_map(per_leaf, grads, new_m, new_v)
-        return updates, _Muon2State(new_m, new_v)
+        return updates, _Muon2State(new_m, new_v, state.count + 1)
 
     return optax.GradientTransformation(init_fn, update_fn)
 
@@ -422,6 +476,30 @@ def branch_2d_labels(pytree):
             return False
         return True
     return jax.tree_util.tree_map_with_path(label_of, pytree, is_leaf=is_leaf)
+
+
+def make_lr_schedule(lr, total_epochs):
+    """[P2-6] 学习率调度工厂（借鉴同事 v6：cosine + 尾部地板）。
+
+    exp     : optax.exponential_decay(lr, 1000, 0.9) —— 原版行为（默认）。
+    cosine  : 前 5% 轮线性 warmup 0→lr，随后余弦退火，但不退到 0 而是
+              退到 lr·DHV_LR_MIN_FRAC（默认 2%）后保持 —— 同事 v5 教训：
+              能量 loss 无下界，cosine 退到 lr=0 会尾段发散，地板部分防住。
+    返回 optax 兼容的调度函数（count→lr），Adam 与 Muon2 共用同一形状。
+    """
+    if DHV_SCHED == 'exp':
+        return optax.exponential_decay(lr, 1000, 0.9)
+    if DHV_SCHED == 'cosine':
+        warmup = max(int(total_epochs * 0.05), 1)
+        lr_min = lr * DHV_LR_MIN_FRAC
+        def sched(count):
+            t_w = jnp.clip(count / warmup, 0.0, 1.0)
+            warm = lr * t_w
+            t = jnp.clip((count - warmup) / jnp.maximum(total_epochs - warmup, 1), 0.0, 1.0)
+            cos = lr_min + 0.5 * (lr - lr_min) * (1.0 + jnp.cos(jnp.pi * t))
+            return jnp.where(count < warmup, warm, cos)
+        return sched
+    raise SystemExit(f'[sched] 未知 DHV_SCHED={DHV_SCHED}（可选 exp/cosine）')
 
 
 # 注意：这个函数不能用 jax.jit，否则 JAX 会把整个 memmap 数组（24GB）
@@ -539,8 +617,11 @@ if __name__ == '__main__':
         n_train_total = fs_train.shape[0]
         if n_train_total <= N_VAL:
             raise SystemExit(f'[valsel] 训练样本 {n_train_total} <= 验证集大小 {N_VAL}，无法划分')
-        # 按 seed 确定性划分：所有模型同一 seed 划出同一批验证样本（公平）
-        _rng = np.random.default_rng(args.seed)
+        # [P0-1] 固定划分 seed（与训练 seed 解耦，同事 v7 C1）：
+        #   所有训练 seed 共用同一套 80/10 划分 → multi-seed 的 std 只反映
+        #   初始化差异；堵死"换 seed 顺带换划分"的隐性口子。
+        #   （旧版用 args.seed 划分，不同 seed 划分不同，std 混杂两种方差。）
+        _rng = np.random.default_rng(DHV_SPLIT_SEED)
         _perm = _rng.permutation(n_train_total)
         _val_idx = np.sort(_perm[:N_VAL])
         _tr_idx = np.sort(_perm[N_VAL:])
@@ -565,17 +646,30 @@ if __name__ == '__main__':
             fs_val = np.load(f'data/fs_train_3d5_volume{_suf}.npy', mmap_mode='r')[_val_idx]
         else:
             fs_val = np.load('data/fs_train_volume.npy', mmap_mode='r').reshape(-1, 101**2)[_val_idx]
-        print(f'[valsel] 训练 {len(_tr_idx)} / 验证 {len(_val_idx)} (seed={args.seed} 确定性划分)')
+        print(f'[valsel] 训练 {len(_tr_idx)} / 验证 {len(_val_idx)} (划分 seed={DHV_SPLIT_SEED}, 与训练 seed 解耦)')
         print(f'[valsel] 验证样本索引: {_val_idx.tolist()}')
         print(f'[valsel] 每 {EVAL_EVERY} 轮评一次验证 MAPE, 保留最优权重')
 
     # result dir（带 seed 后缀：多 seed 固定协议下不同种子不互相覆盖）
+    #   [C3 轻量版] 影响结果的非默认配置全部进目录名，防止"改配置重跑静默覆盖旧结果"。
     root_dir = os.path.join(os.getcwd(), 'results', 'results_volume', args.model_name)
     _vs = '_valsel' if VALSEL_ON else ''
+    _cfg = ''
+    if DHV_SCHED != 'exp':
+        _cfg += f'_sched{DHV_SCHED}'
+        if DHV_SCHED == 'cosine':
+            _cfg += f'_lrmin{DHV_LR_MIN_FRAC:g}'
+    if args.mode == '3d5':
+        if DHV_GRAD_CLIP > 0:
+            _cfg += f'_clip{DHV_GRAD_CLIP:g}'
+        if DHV_ENERGY and DHV_ENERGY_FORM != 'fvm':
+            _cfg += f'_ef{DHV_ENERGY_FORM}'
+    if DHV_MUON2:
+        _cfg += '_muon2'
     result_dir = os.path.join(root_dir, 'nf'+str(args.batch)+'_nc'+str(args.nc) + '_branch_' + str(args.branch_depth) +
                               '_'+str(args.branch_hidden)+'_trunk_' + str(args.trunk_depth) +
                               '_'+str(args.trunk_hidden)+'_r'+ str(args.r) + '_mode_' + str(args.mode)
-                              + _vs + f'_seed{args.seed}')
+                              + _vs + _cfg + f'_seed{args.seed}')
     
     # make dir
     os.makedirs(result_dir, exist_ok=True)
@@ -601,7 +695,19 @@ if __name__ == '__main__':
 
 
     # update function
+    #   [P2-7] DHV_GRAD_CLIP>0 且 mode=3d5 时，先做全局范数裁剪再更新——
+    #   防Muon2 大步幅 × 热点 batch 的单步尖峰（同事实测 bc=172.5 尖峰）。
+    #   baseline 分支不经过此包装（保持原版 update 一字不动）。
     update_fn = update
+    if args.mode == '3d5' and DHV_GRAD_CLIP > 0:
+        _clipper = optax.clip_by_global_norm(DHV_GRAD_CLIP)
+        @eqx.filter_jit
+        def update_fn(grads, optimizer, opt_state, model):
+            grads, _ = _clipper.update(grads, None)
+            updates, opt_state = optimizer.update(grads, opt_state, model)
+            model = eqx.apply_updates(model, updates)
+            return model, opt_state
+        print(f'[opt] 梯度裁剪已启用: global_norm ≤ {DHV_GRAD_CLIP:g} (仅 3d5 分支)')
 
     # random key
     key = jax.random.PRNGKey(args.seed)
@@ -630,7 +736,9 @@ if __name__ == '__main__':
     # define the optimizer
     #   A3: DHV_MUON2=1 时 branch 2D 权重用 Muon2，其余参数用 Adam（multi_transform）。
     #   mask 需要 params 形状，故须在 model init 之后确定。
-    schedule = optax.exponential_decay(args.lr, 1000, 0.9)
+    #   [P2-6] 调度由 make_lr_schedule 决定（exp=原版 / cosine+lr floor），
+    #   Adam 与 Muon2 接同一调度形状（修复 Muon2 固定 lr 的协议不对称）。
+    schedule = make_lr_schedule(args.lr, args.epochs)
     if DHV_MUON2:
         # optax 0.2.8 的 multi_transform 签名：
         #   (transforms: Mapping[label->transform], param_labels: 标签树)
@@ -644,7 +752,7 @@ if __name__ == '__main__':
         # 解法：显式传"返回标签树的函数"，optax 会正确调用之拿到纯标签树。
         param_labels_fn = lambda p: branch_2d_labels(p)
         optimizer = optax.multi_transform(
-            {'muon2': muon2(args.lr), 'adam': optax.adam(schedule)}, param_labels_fn)
+            {'muon2': muon2(schedule), 'adam': optax.adam(schedule)}, param_labels_fn)
         print(f'[opt] Muon2(branch 2D矩阵, {n_muon} 个) + Adam(其余)，multi_transform 组装')
     else:
         optimizer = optax.adam(schedule)
@@ -676,18 +784,43 @@ if __name__ == '__main__':
     if VALSEL_ON:
         # 固定协议：每 EVAL_EVERY 轮在验证集评 MAPE，训练结束回填最优权重。
         # 验证评估 = eval_heat3d 的 MAPE 均值（与最终测试同口径），baseline/3d5 相同。
+        # [P0-2] val 评估写入 _valeval/ 子目录（同事 v7 C2）：eval_heat3d 会落盘
+        #   u_pred，与最终【测试集】结果写进同一目录会互相覆盖、事后难区分 val/test，
+        #   隔离后从文件层面杜绝混淆与误报。
+        val_dir = os.path.join(result_dir, '_valeval')
+        os.makedirs(val_dir, exist_ok=True)
         def val_eval_fn(m):
-            _, _, _, _, _, _, vm, _, _, _ = eval_heat3d(m, test_generator, fs_val, u_val, result_dir)
+            _, _, _, _, _, _, vm, _, _, _ = eval_heat3d(m, test_generator, fs_val, u_val, val_dir)
             return vm
-        model, optimizer, opt_state, runtime, best_epoch, best_mape = train_loop_valsel(
+        model, optimizer, opt_state, runtime, best_epoch, best_mape, final_model = train_loop_valsel(
             model, optimizer, opt_state, update_fn, train_generator, loss_fn,
             args.epochs, args.log_epoch, result_dir, args.device_name, subkey,
             val_eval_fn=val_eval_fn, eval_every=EVAL_EVERY)
         print(f'[valsel] 最优权重 @epoch {best_epoch}, 验证 MAPE={best_mape:.6f}')
+
+        # [P2-8] model soup（借鉴同事 v6）：候选 θ_avg=(best+final)/2，
+        #   验证 MAPE 更优才采用——最坏情况=best，零风险。
+        #   同事教训：尾段权重被污染时 avg 会被本机制自动拒绝（非保险丝）。
+        soup_used = False
+        if DHV_SOUP and final_model is not None:
+            avg_model = jax.tree_util.tree_map(lambda a, b: 0.5 * (a + b),
+                                               model, final_model)
+            val_avg = float(val_eval_fn(avg_model))
+            soup_used = val_avg < float(best_mape)
+            print(f"[soup] avg(best,final) 验证 MAPE={val_avg:.6f} vs best={float(best_mape):.6f} "
+                  f"-> {'采用 avg' if soup_used else '保留 best'}")
+            if soup_used:
+                model = avg_model
+
         with open(os.path.join(result_dir, 'valsel_summary.txt'), 'w') as f:
             f.write(f'seed={args.seed}\nbest_epoch={best_epoch}\nbest_val_mape={best_mape}\n'
                     f'n_val={N_VAL}\neval_every={EVAL_EVERY}\n'
-                    f'val_idx={_val_idx.tolist()}\n')
+                    f'split_seed={DHV_SPLIT_SEED}\n'
+                    f'val_idx={_val_idx.tolist()}\n'
+                    f'sched={DHV_SCHED}\nlr_min_frac={DHV_LR_MIN_FRAC}\n'
+                    f'grad_clip={DHV_GRAD_CLIP if args.mode == "3d5" else 0}\n'
+                    f'energy_form={DHV_ENERGY_FORM if args.mode == "3d5" else "n/a"}\n'
+                    f'soup={"used" if soup_used else ("rejected" if DHV_SOUP else "off")}\n')
     else:
         model, optimizer, opt_state, runtime = train_loop(model, optimizer, opt_state, update_fn, train_generator, loss_fn, args.epochs, args.log_epoch, result_dir, args.device_name, subkey)
     
@@ -698,7 +831,15 @@ if __name__ == '__main__':
     
     
     # eval the trained model
-    rel_l2_mean, rel_l2_std, rmse_mean, rmse_std, max_l1_mean, max_l1_std, mape_mean, mape_std, pape_mean, pape_std = eval_heat3d(model,test_generator,fs_test,u_test,result_dir)
+    #   [P0-3] 测试集访问计数器（同事 v7 C5，红线机制化）：测试集只允许最终评估
+    #   碰一次；未来任何改动若引入第二次测试集评估，直接抛异常终止，而非静默通过。
+    _test_eval = {'n': 0}
+    def eval_test_once(m):
+        _test_eval['n'] += 1
+        if _test_eval['n'] > 1:
+            raise RuntimeError('[红线] 测试集评估被调用超过 1 次 —— 违反固定协议，终止')
+        return eval_heat3d(m, test_generator, fs_test, u_test, result_dir)
+    rel_l2_mean, rel_l2_std, rmse_mean, rmse_std, max_l1_mean, max_l1_std, mape_mean, mape_std, pape_mean, pape_std = eval_test_once(model)
     print(f'Runtime --> total: {runtime:.2f}sec ({(runtime/(args.epochs-1)*1000):.2f}ms/iter.)')
     print(f'rel_l2 --> mean: {rel_l2_mean:.8f} (std: {rel_l2_std: 8f})')
     print(f'rmse --> mean: {rmse_mean:.8f} (std: {rmse_std: 8f})')

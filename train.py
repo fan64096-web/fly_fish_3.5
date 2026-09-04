@@ -65,8 +65,9 @@ def train_loop_valsel(model, optimizer, opt_state, update_fn, train_generator,
     val_eval_fn: callable(model) -> float，验证集 MAPE（越小越好）。
                  传 None 则等价普通训练（返回末轮权重）。
     eval_every:  每 N 轮评一次验证集。
-    返回: (model, optimizer, opt_state, runtime, best_epoch, best_mape)
-          model 已回填为验证 MAPE 最低时刻的权重快照。
+    返回: (model, optimizer, opt_state, runtime, best_epoch, best_mape, final_model)
+          model 已回填为验证 MAPE 最低时刻的权重快照；
+          final_model = 末轮权重快照（供 model soup 用，P2-8；valsel 关闭时为 None）。
     """
     best_mape = float('inf')
     best_epoch = -1
@@ -110,8 +111,11 @@ def train_loop_valsel(model, optimizer, opt_state, update_fn, train_generator,
 
     runtime = time.time() - start if start is not None else 0.0
 
+    # 末轮权重快照（soup 候选；在 best 回填前抓取）
+    final_model = snapshot(model) if val_eval_fn is not None else None
+
     # 直接返回最优时刻的完整模型快照
     if val_eval_fn is not None and best_epoch > 0:
         model = best_model
 
-    return model, optimizer, opt_state, runtime, best_epoch, best_mape
+    return model, optimizer, opt_state, runtime, best_epoch, best_mape, final_model
