@@ -27,3 +27,9 @@ data/
 
 # 数据集(Icepak报告)不入库
 ikepak_data_out/reports/
+
+# 数据集配置(功率清单/划分/元数据)不入库
+ikepak_samples.txt
+ikepak_data_out/icepak_samples.txt
+meta_icepak_dataset.json
+ikepak_data_out/meta_icepak_dataset.json
