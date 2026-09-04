@@ -1,0 +1,77 @@
+nohup: ignoring input
+评估真值: data/u_test_volume.npy (Icepak 真实温度场, 形状 (10, 101, 101, 56))
+[valsel] 训练 80 / 验证 10 (划分 seed=12345, 与训练 seed 解耦)
+[valsel] 验证样本索引: [6, 14, 19, 32, 41, 62, 63, 64, 81, 86]
+[valsel] 每 500 轮评一次验证 MAPE, 保留最优权重
+iyz,jyz,kyz,byz->bijky
+Total number of parameters: 8526592
+[3d5] 分区 k 场已构造, 形状 (1, 101, 101, 56, 1), 值域 [0.00038, 0.1000]
+[3d5] 功率幅值修正 DHV_POWER_SCALE=0.33 (量纲解析推导; 设 1 可关闭)
+Epoch 1/20000 - Loss: 611.8569946289062
+  [VAL @500] val_mape=0.041281  <-- best
+  [VAL @1000] val_mape=0.042525
+Epoch 1001/20000 - Loss: 0.7837305068969727
+  [VAL @1500] val_mape=0.046955
+  [VAL @2000] val_mape=0.132267
+Epoch 2001/20000 - Loss: 1.476143717765808
+  [VAL @2500] val_mape=0.022107  <-- best
+  [VAL @3000] val_mape=1.545066
+Epoch 3001/20000 - Loss: 57013.08984375
+  [VAL @3500] val_mape=1.297360
+  [VAL @4000] val_mape=0.916900
+Epoch 4001/20000 - Loss: 289.89935302734375
+  [VAL @4500] val_mape=0.582538
+  [VAL @5000] val_mape=0.300040
+Epoch 5001/20000 - Loss: 301.68817138671875
+  [VAL @5500] val_mape=0.127999
+  [VAL @6000] val_mape=0.058046
+Epoch 6001/20000 - Loss: 80.24229431152344
+  [VAL @6500] val_mape=0.065358
+  [VAL @7000] val_mape=0.069706
+Epoch 7001/20000 - Loss: 52.293888092041016
+  [VAL @7500] val_mape=0.072725
+  [VAL @8000] val_mape=0.071526
+Epoch 8001/20000 - Loss: 38.35911560058594
+  [VAL @8500] val_mape=0.065738
+  [VAL @9000] val_mape=0.062180
+Epoch 9001/20000 - Loss: 149.70761108398438
+  [VAL @9500] val_mape=0.074282
+  [VAL @10000] val_mape=0.070529
+Epoch 10001/20000 - Loss: 123.03640747070312
+  [VAL @10500] val_mape=0.125754
+  [VAL @11000] val_mape=0.082148
+Epoch 11001/20000 - Loss: 37.22928237915039
+  [VAL @11500] val_mape=0.110359
+  [VAL @12000] val_mape=0.089292
+Epoch 12001/20000 - Loss: 520.845458984375
+  [VAL @12500] val_mape=0.104851
+  [VAL @13000] val_mape=0.115754
+Epoch 13001/20000 - Loss: 181.1157989501953
+  [VAL @13500] val_mape=0.100054
+  [VAL @14000] val_mape=0.089899
+Epoch 14001/20000 - Loss: 192.98484802246094
+  [VAL @14500] val_mape=0.094668
+  [VAL @15000] val_mape=0.097779
+Epoch 15001/20000 - Loss: 9.935968399047852
+  [VAL @15500] val_mape=0.096506
+  [VAL @16000] val_mape=0.100428
+Epoch 16001/20000 - Loss: 39.017581939697266
+  [VAL @16500] val_mape=0.105919
+  [VAL @17000] val_mape=0.075523
+Epoch 17001/20000 - Loss: 74.28164672851562
+  [VAL @17500] val_mape=0.082355
+  [VAL @18000] val_mape=0.082682
+Epoch 18001/20000 - Loss: 10.189382553100586
+  [VAL @18500] val_mape=0.085464
+  [VAL @19000] val_mape=0.082530
+Epoch 19001/20000 - Loss: 14.941314697265625
+  [VAL @19500] val_mape=0.083770
+  [VAL @20000] val_mape=0.074920
+[valsel] 最优权重 @epoch 2500, 验证 MAPE=0.022107
+[soup] avg(best,final) 验证 MAPE=0.119690 vs best=0.022107 -> 保留 best
+Runtime --> total: 362.47sec (18.12ms/iter.)
+rel_l2 --> mean: 0.22830610 (std:  0.164466)
+rmse --> mean: 0.20788331 (std:  0.116696)
+max_l1 --> mean: 0.27268869 (std:  0.165754)
+mape --> mean: 0.01570468 (std:  0.009636)
+pape --> mean: 0.02746250 (std:  0.009820)
