@@ -58,6 +58,15 @@ DHV_MUON2 = os.environ.get('DHV_MUON2', '0') == '1'
 #   共用同一套 80/10 划分——multi-seed 的 std 只反映初始化差异，不含划分差异；
 #   且堵死"多试 seed 顺带挑到好划分"的隐性口子。可用 DHV_SPLIT_SEED 覆盖。
 DHV_SPLIT_SEED = int(os.environ.get('DHV_SPLIT_SEED', '12345'))
+# [选优口径] 验证集选优指标（2026-09-04 决议：主指标=峰值温度误差，平均口径并列保留）。
+#   默认 both = 双指标均衡选优：对每个评估点计算
+#     score = 峰值/历史最优峰值 + 平均/历史最优平均   （两项各自≥1，越小越好）
+#   前沿归一化、无需人工权重，峰值与平均谁都不偏废。
+#   可选: both(默认)/max_l1(仅峰值)/pape/mape(仅平均,旧行为)/rel_l2/rmse。
+#   教训（2026-09-04 公平性审计）：选优指标必须覆盖汇报指标，
+#   否则等于用错误的尺子挑权重。
+DHV_VAL_METRIC = os.environ.get('DHV_VAL_METRIC', 'both')
+_VAL_METRIC_IDX = {'rel_l2': 0, 'rmse': 2, 'max_l1': 4, 'mape': 6, 'pape': 8}
 # [P2-6] 学习率调度：exp=原版 exponential_decay(1e-3,1000,0.9)；
 #   cosine=5% 线性 warmup + 余弦退火 + 尾部地板 DHV_LR_MIN_FRAC（默认 2%）。
 #   依据同事 v5 教训：cosine 退到 lr=0 时能量 loss（无下界）尾段发散，
@@ -648,7 +657,7 @@ if __name__ == '__main__':
             fs_val = np.load('data/fs_train_volume.npy', mmap_mode='r').reshape(-1, 101**2)[_val_idx]
         print(f'[valsel] 训练 {len(_tr_idx)} / 验证 {len(_val_idx)} (划分 seed={DHV_SPLIT_SEED}, 与训练 seed 解耦)')
         print(f'[valsel] 验证样本索引: {_val_idx.tolist()}')
-        print(f'[valsel] 每 {EVAL_EVERY} 轮评一次验证 MAPE, 保留最优权重')
+        print(f'[valsel] 每 {EVAL_EVERY} 轮评一次验证集(指标={DHV_VAL_METRIC}), 保留最优权重')
 
     # result dir（带 seed 后缀：多 seed 固定协议下不同种子不互相覆盖）
     #   [C3 轻量版] 影响结果的非默认配置全部进目录名，防止"改配置重跑静默覆盖旧结果"。
@@ -666,6 +675,8 @@ if __name__ == '__main__':
             _cfg += f'_ef{DHV_ENERGY_FORM}'
         if DHV_NO_INTERFACE:
             _cfg += '_ni'   # 2026-09-04 修复: 缺此前缀导致臂D覆盖臂A同seed结果目录
+    if DHV_VAL_METRIC != 'mape':
+        _cfg += f'_sel{DHV_VAL_METRIC}'   # 选优指标进目录名(旧行为=mape无后缀,可区分)
     if DHV_MUON2:
         _cfg += '_muon2'
     result_dir = os.path.join(root_dir, 'nf'+str(args.batch)+'_nc'+str(args.nc) + '_branch_' + str(args.branch_depth) +
@@ -791,14 +802,30 @@ if __name__ == '__main__':
         #   隔离后从文件层面杜绝混淆与误报。
         val_dir = os.path.join(result_dir, '_valeval')
         os.makedirs(val_dir, exist_ok=True)
+        # [选优口径] DHV_VAL_METRIC 可切换；both=峰值+平均双指标前沿归一化均衡选优
+        assert DHV_VAL_METRIC in _VAL_METRIC_IDX or DHV_VAL_METRIC == 'both', \
+            f'未知选优指标 {DHV_VAL_METRIC}'
+        _valsel_state = {'best_peak': float('inf'), 'best_avg': float('inf')}
+        _valsel_detail = os.path.join(val_dir, 'val_detail.csv')
         def val_eval_fn(m):
-            _, _, _, _, _, _, vm, _, _, _ = eval_heat3d(m, test_generator, fs_val, u_val, val_dir)
-            return vm
+            out = eval_heat3d(m, test_generator, fs_val, u_val, val_dir)
+            peak, avg = float(out[4]), float(out[6])   # max_l1(峰值) 与 mape(平均)
+            if DHV_VAL_METRIC == 'both':
+                st = _valsel_state
+                st['best_peak'] = min(st['best_peak'], peak)
+                st['best_avg'] = min(st['best_avg'], avg)
+                score = peak / st['best_peak'] + avg / st['best_avg']
+                with open(_valsel_detail, 'a') as f:
+                    f.write(f'{peak:.6f},{avg:.6f},{score:.6f}\n')
+                return score
+            return float(out[_VAL_METRIC_IDX[DHV_VAL_METRIC]])
+        print(f'[valsel] 选优指标: {DHV_VAL_METRIC}'
+              + (' (峰值max_l1+平均mape 前沿归一化均衡)' if DHV_VAL_METRIC == 'both' else ''))
         model, optimizer, opt_state, runtime, best_epoch, best_mape, final_model = train_loop_valsel(
             model, optimizer, opt_state, update_fn, train_generator, loss_fn,
             args.epochs, args.log_epoch, result_dir, args.device_name, subkey,
             val_eval_fn=val_eval_fn, eval_every=EVAL_EVERY)
-        print(f'[valsel] 最优权重 @epoch {best_epoch}, 验证 MAPE={best_mape:.6f}')
+        print(f'[valsel] 最优权重 @epoch {best_epoch}, 验证 {DHV_VAL_METRIC}={best_mape:.6f}')
 
         # [P2-8] model soup（借鉴同事 v6）：候选 θ_avg=(best+final)/2，
         #   验证 MAPE 更优才采用——最坏情况=best，零风险。
@@ -820,7 +847,8 @@ if __name__ == '__main__':
                 model = avg_model
 
         with open(os.path.join(result_dir, 'valsel_summary.txt'), 'w') as f:
-            f.write(f'seed={args.seed}\nbest_epoch={best_epoch}\nbest_val_mape={best_mape}\n'
+            f.write(f'seed={args.seed}\nbest_epoch={best_epoch}\nbest_val_{DHV_VAL_METRIC}={best_mape}\n'
+                    f'val_metric={DHV_VAL_METRIC}\n'
                     f'n_val={N_VAL}\neval_every={EVAL_EVERY}\n'
                     f'split_seed={DHV_SPLIT_SEED}\n'
                     f'val_idx={_val_idx.tolist()}\n'
