@@ -24,3 +24,6 @@ data/
 
 # Icepak é¢„æµ‹äº§ç‰©ï¼ˆä½“ç§¯å¤§ï¼Œä¸å…¥åº“ï¼‰
 *.tar.gz
+
+# Êı¾İ¼¯(Icepak±¨¸æ)²»Èë¿â
+ikepak_data_out/reports/
