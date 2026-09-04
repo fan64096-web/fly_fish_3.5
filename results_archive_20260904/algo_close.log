@@ -1,0 +1,295 @@
+===== 3.5d主配置(fvm能量) seed43 =====
+评估真值: data/u_test_volume.npy (Icepak 真实温度场, 形状 (10, 101, 101, 56))
+[valsel] 训练 80 / 验证 10 (划分 seed=12345, 与训练 seed 解耦)
+[valsel] 验证样本索引: [6, 14, 19, 32, 41, 62, 63, 64, 81, 86]
+[valsel] 每 500 轮评一次验证集(指标=mape), 保留最优权重
+iyz,jyz,kyz,byz->bijky
+Total number of parameters: 8526592
+[3d5] 分区 k 场已构造, 形状 (1, 101, 101, 56, 1), 值域 [0.00038, 0.1000]
+[3d5] 功率幅值修正 DHV_POWER_SCALE=0.33 (量纲解析推导; 设 1 可关闭)
+[valsel] 选优指标: mape
+Epoch 1/20000 - Loss: 375.9788818359375
+  [VAL @500] val_mape=0.058920  <-- best
+  [VAL @1000] val_mape=0.058767  <-- best
+  [VAL @1500] val_mape=0.058764  <-- best
+  [VAL @2000] val_mape=0.049500  <-- best
+  [VAL @2500] val_mape=0.047954  <-- best
+  [VAL @3000] val_mape=0.048459
+  [VAL @3500] val_mape=0.048436
+  [VAL @4000] val_mape=0.047889  <-- best
+  [VAL @4500] val_mape=0.047498  <-- best
+  [VAL @5000] val_mape=0.046402  <-- best
+  [VAL @5500] val_mape=0.045039  <-- best
+  [VAL @6000] val_mape=0.043520  <-- best
+  [VAL @6500] val_mape=0.042244  <-- best
+  [VAL @7000] val_mape=0.039581  <-- best
+  [VAL @7500] val_mape=0.036661  <-- best
+  [VAL @8000] val_mape=0.033422  <-- best
+  [VAL @8500] val_mape=0.027322  <-- best
+  [VAL @9000] val_mape=0.023899  <-- best
+  [VAL @9500] val_mape=0.020618  <-- best
+  [VAL @10000] val_mape=0.022235
+Epoch 10001/20000 - Loss: -0.13907715678215027
+  [VAL @10500] val_mape=0.017364  <-- best
+  [VAL @11000] val_mape=0.023715
+  [VAL @11500] val_mape=0.014830  <-- best
+  [VAL @12000] val_mape=0.015845
+  [VAL @12500] val_mape=0.016440
+  [VAL @13000] val_mape=0.024054
+  [VAL @13500] val_mape=0.030426
+  [VAL @14000] val_mape=0.033829
+  [VAL @14500] val_mape=0.052858
+  [VAL @15000] val_mape=0.070516
+  [VAL @15500] val_mape=0.081391
+  [VAL @16000] val_mape=0.097036
+  [VAL @16500] val_mape=0.119936
+  [VAL @17000] val_mape=0.102982
+  [VAL @17500] val_mape=0.243276
+  [VAL @18000] val_mape=0.348628
+  [VAL @18500] val_mape=0.502911
+  [VAL @19000] val_mape=0.463094
+  [VAL @19500] val_mape=0.666652
+  [VAL @20000] val_mape=0.864778
+[valsel] 最优权重 @epoch 11500, 验证 mape=0.014830
+[soup] avg(best,final) 验证 MAPE=0.257965 vs best=0.014830 -> 保留 best
+Runtime --> total: 345.69sec (17.29ms/iter.)
+rel_l2 --> mean: 0.16781177 (std:  0.077162)
+rmse --> mean: 0.17128059 (std:  0.086937)
+max_l1 --> mean: 0.16300206 (std:  0.103434)
+mape --> mean: 0.01215624 (std:  0.006877)
+pape --> mean: 0.02579201 (std:  0.009669)
+===== 3.5d主配置(fvm能量) seed44 =====
+评估真值: data/u_test_volume.npy (Icepak 真实温度场, 形状 (10, 101, 101, 56))
+[valsel] 训练 80 / 验证 10 (划分 seed=12345, 与训练 seed 解耦)
+[valsel] 验证样本索引: [6, 14, 19, 32, 41, 62, 63, 64, 81, 86]
+[valsel] 每 500 轮评一次验证集(指标=mape), 保留最优权重
+iyz,jyz,kyz,byz->bijky
+Total number of parameters: 8526592
+[3d5] 分区 k 场已构造, 形状 (1, 101, 101, 56, 1), 值域 [0.00038, 0.1000]
+[3d5] 功率幅值修正 DHV_POWER_SCALE=0.33 (量纲解析推导; 设 1 可关闭)
+[valsel] 选优指标: mape
+Epoch 1/20000 - Loss: 2583.6064453125
+  [VAL @500] val_mape=0.071757  <-- best
+  [VAL @1000] val_mape=0.040412  <-- best
+  [VAL @1500] val_mape=0.018378  <-- best
+  [VAL @2000] val_mape=0.016180  <-- best
+  [VAL @2500] val_mape=0.069810
+  [VAL @3000] val_mape=0.020096
+  [VAL @3500] val_mape=0.177335
+  [VAL @4000] val_mape=0.091793
+  [VAL @4500] val_mape=0.049725
+  [VAL @5000] val_mape=0.046065
+  [VAL @5500] val_mape=0.038462
+  [VAL @6000] val_mape=0.036539
+  [VAL @6500] val_mape=0.036951
+  [VAL @7000] val_mape=0.060383
+  [VAL @7500] val_mape=0.033072
+  [VAL @8000] val_mape=0.025691
+  [VAL @8500] val_mape=0.036602
+  [VAL @9000] val_mape=0.039898
+  [VAL @9500] val_mape=0.060905
+  [VAL @10000] val_mape=0.030515
+Epoch 10001/20000 - Loss: -0.0016855299472808838
+  [VAL @10500] val_mape=0.082926
+  [VAL @11000] val_mape=0.042603
+  [VAL @11500] val_mape=0.087944
+  [VAL @12000] val_mape=0.059477
+  [VAL @12500] val_mape=0.030633
+  [VAL @13000] val_mape=0.129607
+  [VAL @13500] val_mape=0.123611
+  [VAL @14000] val_mape=0.127761
+  [VAL @14500] val_mape=0.166899
+  [VAL @15000] val_mape=0.199080
+  [VAL @15500] val_mape=0.238166
+  [VAL @16000] val_mape=0.263061
+  [VAL @16500] val_mape=0.342121
+  [VAL @17000] val_mape=0.397766
+  [VAL @17500] val_mape=0.470552
+  [VAL @18000] val_mape=0.518612
+  [VAL @18500] val_mape=0.574874
+  [VAL @19000] val_mape=0.643651
+  [VAL @19500] val_mape=0.717707
+  [VAL @20000] val_mape=0.768209
+[valsel] 最优权重 @epoch 2000, 验证 mape=0.016180
+[soup] avg(best,final) 验证 MAPE=0.429208 vs best=0.016180 -> 保留 best
+Runtime --> total: 371.07sec (18.55ms/iter.)
+rel_l2 --> mean: 0.17049725 (std:  0.103013)
+rmse --> mean: 0.16453063 (std:  0.081299)
+max_l1 --> mean: 0.17724381 (std:  0.105859)
+mape --> mean: 0.01191700 (std:  0.006694)
+pape --> mean: 0.03105083 (std:  0.006385)
+===== baseline seed42 =====
+评估真值: data/u_test_volume.npy (Icepak 真实温度场, 形状 (10, 101, 101, 56))
+[valsel] 训练 80 / 验证 10 (划分 seed=12345, 与训练 seed 解耦)
+[valsel] 验证样本索引: [6, 14, 19, 32, 41, 62, 63, 64, 81, 86]
+[valsel] 每 500 轮评一次验证集(指标=mape), 保留最优权重
+iyz,jyz,kyz,byz->bijky
+Total number of parameters: 3303680
+[valsel] 选优指标: mape
+Epoch 1/20000 - Loss: 1887.7139892578125
+  [VAL @500] val_mape=0.071897  <-- best
+  [VAL @1000] val_mape=0.069944  <-- best
+  [VAL @1500] val_mape=0.065061  <-- best
+  [VAL @2000] val_mape=0.060967  <-- best
+  [VAL @2500] val_mape=0.055083  <-- best
+  [VAL @3000] val_mape=0.051155  <-- best
+  [VAL @3500] val_mape=0.043853  <-- best
+  [VAL @4000] val_mape=0.030380  <-- best
+  [VAL @4500] val_mape=0.019697  <-- best
+  [VAL @5000] val_mape=0.013856  <-- best
+  [VAL @5500] val_mape=0.011977  <-- best
+  [VAL @6000] val_mape=0.011888  <-- best
+  [VAL @6500] val_mape=0.051030
+  [VAL @7000] val_mape=0.086174
+  [VAL @7500] val_mape=0.101907
+  [VAL @8000] val_mape=0.093336
+  [VAL @8500] val_mape=0.117245
+  [VAL @9000] val_mape=0.106774
+  [VAL @9500] val_mape=0.117316
+  [VAL @10000] val_mape=0.117477
+Epoch 10001/20000 - Loss: 0.10109629482030869
+  [VAL @10500] val_mape=0.093849
+  [VAL @11000] val_mape=0.122035
+  [VAL @11500] val_mape=0.114145
+  [VAL @12000] val_mape=0.126658
+  [VAL @12500] val_mape=0.110725
+  [VAL @13000] val_mape=0.123587
+  [VAL @13500] val_mape=0.128800
+  [VAL @14000] val_mape=0.126982
+  [VAL @14500] val_mape=0.125181
+  [VAL @15000] val_mape=0.120413
+  [VAL @15500] val_mape=0.050097
+  [VAL @16000] val_mape=0.009853  <-- best
+  [VAL @16500] val_mape=0.031715
+  [VAL @17000] val_mape=0.070355
+  [VAL @17500] val_mape=0.105134
+  [VAL @18000] val_mape=0.114345
+  [VAL @18500] val_mape=0.115359
+  [VAL @19000] val_mape=0.116066
+  [VAL @19500] val_mape=0.124940
+  [VAL @20000] val_mape=0.122724
+[valsel] 最优权重 @epoch 16000, 验证 mape=0.009853
+[soup] avg(best,final) 验证 MAPE=0.028202 vs best=0.009853 -> 保留 best
+Runtime --> total: 343.08sec (17.15ms/iter.)
+rel_l2 --> mean: 0.15148860 (std:  0.014741)
+rmse --> mean: 0.15589587 (std:  0.037117)
+max_l1 --> mean: 0.07318068 (std:  0.034434)
+mape --> mean: 0.01032673 (std:  0.002531)
+pape --> mean: 0.03047077 (std:  0.005450)
+===== baseline seed43 =====
+评估真值: data/u_test_volume.npy (Icepak 真实温度场, 形状 (10, 101, 101, 56))
+[valsel] 训练 80 / 验证 10 (划分 seed=12345, 与训练 seed 解耦)
+[valsel] 验证样本索引: [6, 14, 19, 32, 41, 62, 63, 64, 81, 86]
+[valsel] 每 500 轮评一次验证集(指标=mape), 保留最优权重
+iyz,jyz,kyz,byz->bijky
+Total number of parameters: 3303680
+[valsel] 选优指标: mape
+Epoch 1/20000 - Loss: 2620.509521484375
+  [VAL @500] val_mape=0.069214  <-- best
+  [VAL @1000] val_mape=0.051861  <-- best
+  [VAL @1500] val_mape=0.040029  <-- best
+  [VAL @2000] val_mape=0.060163
+  [VAL @2500] val_mape=0.019617  <-- best
+  [VAL @3000] val_mape=0.009707  <-- best
+  [VAL @3500] val_mape=0.012433
+  [VAL @4000] val_mape=0.011357
+  [VAL @4500] val_mape=0.030690
+  [VAL @5000] val_mape=0.046877
+  [VAL @5500] val_mape=0.010439
+  [VAL @6000] val_mape=0.088777
+  [VAL @6500] val_mape=0.075955
+  [VAL @7000] val_mape=0.110140
+  [VAL @7500] val_mape=0.114355
+  [VAL @8000] val_mape=0.107242
+  [VAL @8500] val_mape=0.105426
+  [VAL @9000] val_mape=0.116767
+  [VAL @9500] val_mape=0.118781
+  [VAL @10000] val_mape=0.125893
+Epoch 10001/20000 - Loss: 0.07287907600402832
+  [VAL @10500] val_mape=0.122480
+  [VAL @11000] val_mape=0.124462
+  [VAL @11500] val_mape=0.110474
+  [VAL @12000] val_mape=0.114697
+  [VAL @12500] val_mape=0.118099
+  [VAL @13000] val_mape=0.129332
+  [VAL @13500] val_mape=0.126021
+  [VAL @14000] val_mape=0.127880
+  [VAL @14500] val_mape=0.129316
+  [VAL @15000] val_mape=0.129405
+  [VAL @15500] val_mape=0.129222
+  [VAL @16000] val_mape=0.127984
+  [VAL @16500] val_mape=0.128381
+  [VAL @17000] val_mape=0.131864
+  [VAL @17500] val_mape=0.129262
+  [VAL @18000] val_mape=0.121520
+  [VAL @18500] val_mape=0.130250
+  [VAL @19000] val_mape=0.127497
+  [VAL @19500] val_mape=0.129419
+  [VAL @20000] val_mape=0.125538
+[valsel] 最优权重 @epoch 3000, 验证 mape=0.009707
+[soup] avg(best,final) 验证 MAPE=0.056001 vs best=0.009707 -> 保留 best
+Runtime --> total: 342.42sec (17.12ms/iter.)
+rel_l2 --> mean: 0.15081812 (std:  0.009041)
+rmse --> mean: 0.15358113 (std:  0.029306)
+max_l1 --> mean: 0.09672536 (std:  0.049081)
+mape --> mean: 0.00986763 (std:  0.002069)
+pape --> mean: 0.03264786 (std:  0.001378)
+===== baseline seed44 =====
+评估真值: data/u_test_volume.npy (Icepak 真实温度场, 形状 (10, 101, 101, 56))
+[valsel] 训练 80 / 验证 10 (划分 seed=12345, 与训练 seed 解耦)
+[valsel] 验证样本索引: [6, 14, 19, 32, 41, 62, 63, 64, 81, 86]
+[valsel] 每 500 轮评一次验证集(指标=mape), 保留最优权重
+iyz,jyz,kyz,byz->bijky
+Total number of parameters: 3303680
+[valsel] 选优指标: mape
+Epoch 1/20000 - Loss: 4329.5546875
+  [VAL @500] val_mape=0.077691  <-- best
+  [VAL @1000] val_mape=0.068273  <-- best
+  [VAL @1500] val_mape=0.054042  <-- best
+  [VAL @2000] val_mape=0.057496
+  [VAL @2500] val_mape=0.032670  <-- best
+  [VAL @3000] val_mape=0.019031  <-- best
+  [VAL @3500] val_mape=0.010715  <-- best
+  [VAL @4000] val_mape=0.024534
+  [VAL @4500] val_mape=0.028743
+  [VAL @5000] val_mape=0.011318
+  [VAL @5500] val_mape=0.070505
+  [VAL @6000] val_mape=0.072582
+  [VAL @6500] val_mape=0.083920
+  [VAL @7000] val_mape=0.064100
+  [VAL @7500] val_mape=0.050276
+  [VAL @8000] val_mape=0.078773
+  [VAL @8500] val_mape=0.102185
+  [VAL @9000] val_mape=0.121862
+  [VAL @9500] val_mape=0.123094
+  [VAL @10000] val_mape=0.111339
+Epoch 10001/20000 - Loss: 0.11416508257389069
+  [VAL @10500] val_mape=0.109852
+  [VAL @11000] val_mape=0.112775
+  [VAL @11500] val_mape=0.117152
+  [VAL @12000] val_mape=0.121475
+  [VAL @12500] val_mape=0.128443
+  [VAL @13000] val_mape=0.127156
+  [VAL @13500] val_mape=0.128048
+  [VAL @14000] val_mape=0.127381
+  [VAL @14500] val_mape=0.123690
+  [VAL @15000] val_mape=0.126638
+  [VAL @15500] val_mape=0.129533
+  [VAL @16000] val_mape=0.128699
+  [VAL @16500] val_mape=0.119465
+  [VAL @17000] val_mape=0.109012
+  [VAL @17500] val_mape=0.128134
+  [VAL @18000] val_mape=0.124062
+  [VAL @18500] val_mape=0.126782
+  [VAL @19000] val_mape=0.127588
+  [VAL @19500] val_mape=0.128321
+  [VAL @20000] val_mape=0.114614
+[valsel] 最优权重 @epoch 3500, 验证 mape=0.010715
+[soup] avg(best,final) 验证 MAPE=0.033927 vs best=0.010715 -> 保留 best
+Runtime --> total: 324.74sec (16.24ms/iter.)
+rel_l2 --> mean: 0.16162685 (std:  0.010051)
+rmse --> mean: 0.16538660 (std:  0.035066)
+max_l1 --> mean: 0.07500448 (std:  0.042079)
+mape --> mean: 0.01093931 (std:  0.002455)
+pape --> mean: 0.03107413 (std:  0.002835)
+ALGO_CLOSE_DONE
