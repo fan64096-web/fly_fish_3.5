@@ -670,7 +670,7 @@ if __name__ == '__main__':
         if DHV_ENERGY and DHV_ENERGY_FORM != 'fvm':
             _cfg += f'_ef{DHV_ENERGY_FORM}'
         if DHV_NO_INTERFACE:
-            _cfg += '_ni'   # 2026-09-04 修复: 缺此前缀导致臂D覆盖臂A同seed结果目录
+            _cfg += '_ni'   # 2026-09-04 修复: 缺此后缀导致无界面消融组覆盖同seed的热点强化组结果目录
     if DHV_VAL_METRIC != 'mape':
         _cfg += f'_sel{DHV_VAL_METRIC}'   # 选优指标进目录名(旧行为=mape无后缀,可区分)
     if DHV_MUON2:

@@ -155,8 +155,8 @@ run_one() { # mode tag seed extra_env
 for seed in $SEEDS; do
     run_one baseline baseline_mode       "$seed" ""
     # 2026-09-04 主配置决议:
-    #   main    = 臂B: fvm 能量形式(调和平均界面内建, v2 核心配方) —— 主配置
-    #   hotspot = 臂A: 连续泛函能量 + 显式界面项 v2 —— 极端热点强化配置
+    #   main    = 3.5d主配置: fvm 能量形式(调和平均界面内建, v2 核心配方)
+    #   hotspot = 3.5d热点强化: 连续泛函能量 + 显式界面项 v2（极端热点场景）
     run_one 3d5      mode_3d5_main       "$seed" "DHV_ENERGY=1"
     run_one 3d5      mode_3d5_hotspot    "$seed" "DHV_ENERGY=1 DHV_ENERGY_FORM=continuous"
 done
