@@ -76,16 +76,6 @@ T_SCALE = 25.0                  # 温度缩放（eval.py 兼容）
 TEST_REPORT_NUMS = {16, 19, 22, 25, 26, 27, 59, 80, 86, 93}
 
 
-def z_icepak_to_train(z_mm):
-    zi = np.asarray(z_mm, dtype=np.float64)
-    zt = np.empty_like(zi)
-    for (a0, a1, b0, b1) in zip(Z_ICEPAK_BOUNDS[:-1], Z_ICEPAK_BOUNDS[1:],
-                                Z_TRAIN_BOUNDS[:-1], Z_TRAIN_BOUNDS[1:]):
-        m = (zi >= a0) & (zi <= a1)
-        zt[m] = b0 + (b1 - b0) * (zi[m] - a0) / (a1 - a0)
-    return zt
-
-
 def read_icepak_report(path):
     """解析 Full report：返回 (xyz_m [M,3] 单位m, T_c [M] 单位°C)。"""
     with open(path, 'r', errors='ignore') as f:
@@ -123,16 +113,6 @@ def build_power_map(powers, nx=NX, ny=NY):
         integral = float(p.sum() * dx * dy)
         if integral > 0:
             p *= total_w / integral
-    return p
-
-
-def normalize_power(p, mode='sum'):
-    if mode == 'sum':
-        s = float(p.sum())
-        return p / s if s > 0 else p
-    if mode == 'peak':
-        m = float(np.abs(p).max())
-        return p / m if m > 0 else p
     return p
 
 

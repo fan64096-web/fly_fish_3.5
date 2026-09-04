@@ -98,10 +98,6 @@ from hvp import hvp_fwdfwd
 from train import train_loop, train_loop_valsel, update
 from eval import eval_heat3d
 
-@jax.jit
-def create_mesh(xi_batch, yi_batch, zi_batch):
-    return jnp.meshgrid(xi_batch.ravel(), yi_batch.ravel(), zi_batch.ravel(), indexing='ij')
-
 
 #########################################################################
 # Loss function
